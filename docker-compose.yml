@@ -1,0 +1,269 @@
+# Name of Application: Catalyst Trading System
+# Name of file: docker-compose.yml
+# Version: 3.0.0
+# Last Updated: 2025-08-16
+# Purpose: Docker Compose configuration for MCP v3.0.0 architecture with managed database
+
+# REVISION HISTORY:
+# v3.0.0 (2025-08-16) - Updated for MCP architecture with correct service names
+# - Fixed orchestration service naming
+# - Updated all service names to match implementation files
+# - Corrected environment file path to ./config/.env
+# - Added proper healthchecks for all services
+# - Removed PostgreSQL (using DigitalOcean managed database)
+
+version: '3.8'
+
+services:
+  # Redis for caching and message queuing
+  redis:
+    image: redis:7-alpine
+    container_name: catalyst-redis
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - catalyst-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # MCP Orchestration Service (Port 5000)
+  orchestration-service:
+    build: 
+      context: .
+      dockerfile: ./services/orchestration/Dockerfile
+    container_name: catalyst-orchestration
+    ports:
+      - "5000:5000"
+    env_file: 
+      - ./config/.env  # Corrected path
+    environment:
+      - SERVICE_NAME=orchestration-service
+      - SERVICE_PORT=5000
+      - MCP_TRANSPORT=websocket
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./logs/orchestration:/app/logs
+      - ./data:/app/data
+    networks:
+      - catalyst-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # News Intelligence Service (Port 5008) - matching news_service_mcp.py
+  news-intelligence:
+    build: 
+      context: .
+      dockerfile: ./services/news/Dockerfile
+    container_name: catalyst-news
+    ports:
+      - "5008:5008"
+    env_file: 
+      - ./config/.env
+    environment:
+      - SERVICE_NAME=news-intelligence
+      - SERVICE_PORT=5008
+      - MCP_TRANSPORT=websocket
+    depends_on:
+      redis:
+        condition: service_healthy
+      orchestration-service:
+        condition: service_started
+    volumes:
+      - ./logs/news:/app/logs
+      - ./data:/app/data
+    networks:
+      - catalyst-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5008/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Security Scanner Service (Port 5001) - matching scanner_service_mcp.py
+  security-scanner:
+    build: 
+      context: .
+      dockerfile: ./services/scanner/Dockerfile
+    container_name: catalyst-scanner
+    ports:
+      - "5001:5001"
+    env_file: 
+      - ./config/.env
+    environment:
+      - SERVICE_NAME=security-scanner
+      - SERVICE_PORT=5001
+      - MCP_TRANSPORT=websocket
+    depends_on:
+      redis:
+        condition: service_healthy
+      orchestration-service:
+        condition: service_started
+      news-intelligence:
+        condition: service_started
+    volumes:
+      - ./logs/scanner:/app/logs
+      - ./data:/app/data
+    networks:
+      - catalyst-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Pattern Analysis Service (Port 5002) - matching pattern_analysis_mcp.py
+  pattern-analysis:
+    build: 
+      context: .
+      dockerfile: ./services/pattern/Dockerfile
+    container_name: catalyst-pattern
+    ports:
+      - "5002:5002"
+    env_file: 
+      - ./config/.env
+    environment:
+      - SERVICE_NAME=pattern-analysis
+      - SERVICE_PORT=5002
+      - MCP_TRANSPORT=websocket
+    depends_on:
+      redis:
+        condition: service_healthy
+      orchestration-service:
+        condition: service_started
+    volumes:
+      - ./logs/pattern:/app/logs
+      - ./data:/app/data
+    networks:
+      - catalyst-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Technical Analysis Service (Port 5003) - matching technical_analysis_mcp.py
+  technical-analysis:
+    build: 
+      context: .
+      dockerfile: ./services/technical/Dockerfile
+    container_name: catalyst-technical
+    ports:
+      - "5003:5003"
+    env_file: 
+      - ./config/.env
+    environment:
+      - SERVICE_NAME=technical-analysis
+      - SERVICE_PORT=5003
+      - MCP_TRANSPORT=websocket
+    depends_on:
+      redis:
+        condition: service_healthy
+      orchestration-service:
+        condition: service_started
+    volumes:
+      - ./logs/technical:/app/logs
+      - ./data:/app/data
+    networks:
+      - catalyst-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Trading Execution Service (Port 5005) - matching trading_service_mcp.py
+  trading-execution:
+    build: 
+      context: .
+      dockerfile: ./services/trading/Dockerfile
+    container_name: catalyst-trading
+    ports:
+      - "5005:5005"
+    env_file: 
+      - ./config/.env
+    environment:
+      - SERVICE_NAME=trading-execution
+      - SERVICE_PORT=5005
+      - MCP_TRANSPORT=websocket
+    depends_on:
+      redis:
+        condition: service_healthy
+      orchestration-service:
+        condition: service_started
+      security-scanner:
+        condition: service_started
+      pattern-analysis:
+        condition: service_started
+      technical-analysis:
+        condition: service_started
+    volumes:
+      - ./logs/trading:/app/logs
+      - ./data:/app/data
+    networks:
+      - catalyst-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5005/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Reporting Service (Port 5009) - matching reporting_service_mcp.py
+  reporting-service:
+    build: 
+      context: .
+      dockerfile: ./services/reporting/Dockerfile
+    container_name: catalyst-reporting
+    ports:
+      - "5009:5009"
+    env_file: 
+      - ./config/.env
+    environment:
+      - SERVICE_NAME=reporting-service
+      - SERVICE_PORT=5009
+      - MCP_TRANSPORT=websocket
+    depends_on:
+      redis:
+        condition: service_healthy
+      orchestration-service:
+        condition: service_started
+    volumes:
+      - ./logs/reporting:/app/logs
+      - ./data:/app/data
+      - ./reports:/app/reports
+    networks:
+      - catalyst-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5009/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  redis_data:
+    driver: local
+
+networks:
+  catalyst-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
