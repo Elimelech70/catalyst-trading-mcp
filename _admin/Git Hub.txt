@@ -1,3 +1,20 @@
+
+
+#********************************
+# From Vscode to GitHub 
+#********************************
+
+
+#********************************
+# From GitHub to Docker
+#********************************
+
+git pull origin main
+
+
+
+
+
 . First, Check Your Current Status
 bash# Navigate to your project directory
 cd ~/catalyst-trading-mcp  # or wherever your project is
