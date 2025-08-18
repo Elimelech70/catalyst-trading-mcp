@@ -2,11 +2,17 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: news-service.py
-Version: 3.0.0
-Last Updated: 2024-12-30
+Version: 3.0.1
+Last Updated: 2025-08-18
 Purpose: MCP-enabled news collection and intelligence service
 
 REVISION HISTORY:
+v3.0.1 (2025-08-18) - Fixed port and database imports
+- Changed port from 5108 to 5008
+- Fixed database_utils imports
+- Added missing database functions
+- Corrected MCP implementation
+
 v3.0.0 (2024-12-30) - Complete MCP migration
 - Transformed from REST to MCP protocol
 - News data exposed as resources
@@ -26,20 +32,20 @@ import logging
 import asyncio
 import hashlib
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, AsyncGenerator
 import structlog
 from mcp import MCPServer, MCPRequest, MCPResponse, ResourceParams, ToolParams
 from mcp.transport import WebSocketTransport, StdioTransport
 import aiohttp
 import feedparser
 import redis.asyncio as redis
+import psycopg2.extras
 
-# Import database utilities
+# Import database utilities - only what's actually available
 from database_utils import (
     get_db_connection,
-    insert_news_article,
-    get_recent_news,
-    get_redis
+    health_check,
+    log_workflow_step
 )
 
 
@@ -89,13 +95,93 @@ class NewsMCPServer:
         self._register_tools()
         self._register_events()
         
-        self.logger.info("News MCP Server initialized", version="3.0.0")
+        self.logger.info("News MCP Server initialized", version="3.0.1")
         
     async def _init_redis(self):
         """Initialize Redis client"""
         if not self.redis_client:
             redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+            redis_password = os.getenv('REDIS_PASSWORD')
+            
+            if redis_password and 'localhost' in redis_url:
+                # Add password to URL
+                redis_url = f'redis://:{redis_password}@localhost:6379/0'
+                
             self.redis_client = await redis.from_url(redis_url, decode_responses=True)
+    
+    # Database helper functions that were missing
+    def get_recent_news(self, symbol: Optional[str] = None, hours: int = 24, limit: int = 100) -> List[Dict]:
+        """Get recent news from database"""
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                query = """
+                    SELECT news_id, symbol, headline, source, 
+                           published_timestamp, content_snippet, url,
+                           is_pre_market, market_state, headline_keywords,
+                           mentioned_tickers, source_tier, metadata
+                    FROM news_raw
+                    WHERE published_timestamp > CURRENT_TIMESTAMP - INTERVAL %s
+                """
+                params = [f'{hours} hours']
+                
+                if symbol:
+                    query += " AND symbol = %s"
+                    params.append(symbol)
+                
+                query += " ORDER BY published_timestamp DESC LIMIT %s"
+                params.append(limit)
+                
+                cur.execute(query, params)
+                
+                news_items = []
+                for row in cur.fetchall():
+                    item = dict(row)
+                    # Convert datetime to string for JSON serialization
+                    if item.get('published_timestamp'):
+                        item['published_timestamp'] = item['published_timestamp'].isoformat()
+                    news_items.append(item)
+                
+                return news_items
+    
+    def insert_news_article(self, article: Dict) -> Optional[str]:
+        """Insert news article into database"""
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                try:
+                    cur.execute("""
+                        INSERT INTO news_raw (
+                            news_id, symbol, headline, source,
+                            published_timestamp, content_snippet, url,
+                            is_pre_market, market_state, headline_keywords,
+                            mentioned_tickers, source_tier, metadata
+                        ) VALUES (
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        )
+                        ON CONFLICT (news_id) DO NOTHING
+                        RETURNING news_id
+                    """, (
+                        article['news_id'],
+                        article.get('symbol'),
+                        article['headline'],
+                        article['source'],
+                        article['published_timestamp'],
+                        article.get('content_snippet'),
+                        article.get('url'),
+                        article.get('is_pre_market', False),
+                        article.get('market_state', 'unknown'),
+                        article.get('headline_keywords', []),
+                        article.get('mentioned_tickers', []),
+                        article.get('source_tier', 5),
+                        json.dumps(article.get('metadata', {}))
+                    ))
+                    
+                    result = cur.fetchone()
+                    return result['news_id'] if result else None
+                    
+                except Exception as e:
+                    self.logger.error(f"Error inserting news article", error=str(e))
+                    conn.rollback()
+                    raise
     
     def _register_resources(self):
         """Register data resources"""
@@ -110,7 +196,7 @@ class NewsMCPServer:
             source_tier = filters.get('source_tier')
             
             # Query database
-            news_articles = get_recent_news(
+            news_articles = self.get_recent_news(
                 symbol=symbol,
                 hours=24 if not since else None,
                 limit=limit
@@ -137,7 +223,7 @@ class NewsMCPServer:
             }
             hours = hours_map.get(timeframe, 24)
             
-            news_articles = get_recent_news(symbol=symbol, hours=hours)
+            news_articles = self.get_recent_news(symbol=symbol, hours=hours)
             
             # Calculate sentiment and other analytics
             sentiment = self._analyze_news_sentiment(news_articles)
@@ -176,11 +262,16 @@ class NewsMCPServer:
                         LIMIT %s
                     """, (limit,))
                     
-                    catalysts = cur.fetchall()
+                    catalysts = []
+                    for row in cur.fetchall():
+                        catalyst = dict(row)
+                        if catalyst.get('published_timestamp'):
+                            catalyst['published_timestamp'] = catalyst['published_timestamp'].isoformat()
+                        catalysts.append(catalyst)
             
             return MCPResponse(
                 resource_type="catalyst_collection",
-                data=[dict(row) for row in catalysts],
+                data=catalysts,
                 metadata={"active_catalysts": len(catalysts)}
             )
         
@@ -199,11 +290,13 @@ class NewsMCPServer:
                         ORDER BY source_tier, article_count DESC
                     """)
                     
-                    metrics = cur.fetchall()
+                    metrics = []
+                    for row in cur.fetchall():
+                        metrics.append(dict(row))
             
             return MCPResponse(
                 resource_type="source_metrics",
-                data=[dict(row) for row in metrics]
+                data=metrics
             )
         
         @self.server.resource("news/trending")
@@ -215,24 +308,32 @@ class NewsMCPServer:
             with get_db_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute("""
-                        SELECT symbol, headline, source,
+                        SELECT symbol, 
                                COUNT(*) as mention_count,
                                MIN(published_timestamp) as first_seen,
                                MAX(published_timestamp) as last_seen,
                                array_agg(DISTINCT source ORDER BY source) as sources
                         FROM news_raw
-                        WHERE published_timestamp > CURRENT_TIMESTAMP - INTERVAL '%s hours'
-                        GROUP BY symbol, SUBSTRING(headline, 1, 50), source
+                        WHERE published_timestamp > CURRENT_TIMESTAMP - INTERVAL %s
+                        AND symbol IS NOT NULL
+                        GROUP BY symbol
                         HAVING COUNT(*) >= 2
                         ORDER BY mention_count DESC, MAX(published_timestamp) DESC
                         LIMIT %s
-                    """, (hours, limit))
+                    """, (f'{hours} hours', limit))
                     
-                    trending = cur.fetchall()
+                    trending = []
+                    for row in cur.fetchall():
+                        trend = dict(row)
+                        if trend.get('first_seen'):
+                            trend['first_seen'] = trend['first_seen'].isoformat()
+                        if trend.get('last_seen'):
+                            trend['last_seen'] = trend['last_seen'].isoformat()
+                        trending.append(trend)
             
             return MCPResponse(
                 resource_type="trending_news",
-                data=[dict(row) for row in trending]
+                data=trending
             )
     
     def _register_tools(self):
@@ -244,13 +345,25 @@ class NewsMCPServer:
             sources = params.get("sources", ["all"])
             mode = params.get("mode", "normal")
             symbols = params.get("symbols", None)
+            cycle_id = params.get("cycle_id")
             
             try:
+                # Log start
+                if cycle_id:
+                    log_workflow_step(cycle_id, 'news_collection', 'started', 
+                                    sources=sources, symbols=symbols)
+                
                 # Initialize Redis if needed
                 await self._init_redis()
                 
                 # Collect from sources
                 results = await self._collect_all_news(symbols, sources)
+                
+                # Log completion
+                if cycle_id:
+                    log_workflow_step(cycle_id, 'news_collection', 'completed',
+                                    articles_collected=results["articles_collected"],
+                                    articles_saved=results["articles_saved"])
                 
                 return MCPResponse(
                     success=True,
@@ -264,6 +377,9 @@ class NewsMCPServer:
                     metadata={"mode": mode}
                 )
             except Exception as e:
+                if cycle_id:
+                    log_workflow_step(cycle_id, 'news_collection', 'failed', error=str(e))
+                    
                 return MCPResponse(
                     success=False,
                     error=str(e)
@@ -280,7 +396,7 @@ class NewsMCPServer:
                 hours_map = {"1h": 1, "4h": 4, "24h": 24, "7d": 168}
                 hours = hours_map.get(timeframe, 24)
                 
-                news_articles = get_recent_news(symbol=symbol, hours=hours)
+                news_articles = self.get_recent_news(symbol=symbol, hours=hours)
                 sentiment = self._analyze_news_sentiment(news_articles)
                 
                 return MCPResponse(
@@ -328,7 +444,7 @@ class NewsMCPServer:
             
             while True:
                 # Check for new news
-                recent_news = get_recent_news(hours=0.1, limit=10)  # Last 6 minutes
+                recent_news = self.get_recent_news(hours=0.1, limit=10)  # Last 6 minutes
                 
                 for article in recent_news:
                     if (not symbols or article.get('symbol') in symbols) and \
@@ -538,7 +654,7 @@ class NewsMCPServer:
                 article.get('source', {}).get('name', 'NewsAPI'),
                 str(published)
             ),
-            'symbol': query if query in symbols else None,
+            'symbol': query if query in (symbols or []) else None,
             'headline': article.get('title', ''),
             'source': article.get('source', {}).get('name', 'NewsAPI'),
             'published_timestamp': published,
@@ -736,7 +852,7 @@ class NewsMCPServer:
         
         for item in news_items:
             try:
-                news_id = insert_news_article(item)
+                news_id = self.insert_news_article(item)
                 if news_id:
                     stats['saved'] += 1
                 else:
@@ -848,7 +964,8 @@ class NewsMCPServer:
     
     async def run(self):
         """Run the MCP server"""
-        self.logger.info("Starting News MCP Server", port=5108)
+        # FIXED: Changed port from 5108 to 5008
+        self.logger.info("Starting News MCP Server", port=5008)
         
         # Initialize Redis
         await self._init_redis()
@@ -857,7 +974,7 @@ class NewsMCPServer:
         if os.getenv('MCP_TRANSPORT', 'websocket') == 'stdio':
             transport = StdioTransport()
         else:
-            transport = WebSocketTransport(port=5108)
+            transport = WebSocketTransport(port=5008)  # FIXED: Changed from 5108
         
         await self.server.run(transport)
 

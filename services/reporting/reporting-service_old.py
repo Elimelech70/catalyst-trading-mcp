@@ -3,7 +3,7 @@
 Name of Application: Catalyst Trading System
 Name of file: reporting-service.py
 Version: 3.0.0
-Last Updated: 2024-12-30
+Last Updated: 2025-08-18
 Purpose: MCP-enabled analytics and reporting service for trading performance
 
 REVISION HISTORY:
@@ -41,6 +41,7 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 import psycopg2
+import psycopg2.extras
 from psycopg2.extras import RealDictCursor
 import redis
 from dotenv import load_dotenv

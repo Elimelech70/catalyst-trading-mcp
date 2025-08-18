@@ -3,7 +3,7 @@
 Name of Application: Catalyst Trading System
 Name of file: orchestration-service.py
 Version: 3.0.0
-Last Updated: 2024-12-30
+Last Updated: 2024-08-18
 Purpose: MCP-enabled orchestration service for news-driven trading workflow
 
 REVISION HISTORY:
@@ -338,8 +338,11 @@ class OrchestrationMCPServer:
     async def _start_new_cycle(self, mode: str) -> Dict:
         """Start a new trading cycle"""
         # Create cycle using database function
-        cycle_id = create_trading_cycle(mode)
-        
+        cycle_id = create_trading_cycle({
+            'scan_type': mode,
+            'target_securities': 50,
+            'config': {'mode': mode}
+})
         self.current_cycle = {
             'cycle_id': cycle_id,
             'mode': mode,
@@ -513,17 +516,12 @@ class OrchestrationMCPServer:
         updates = {
             'status': status,
             'end_time': datetime.now(),
-            'news_collected': self.current_cycle.get('news_collected', 0),
-            'securities_scanned': self.current_cycle.get('candidates_selected', 0),
-            'patterns_analyzed': self.current_cycle.get('patterns_analyzed', 0),
-            'signals_generated': self.current_cycle.get('signals_generated', 0),
+            'candidates_found': self.current_cycle.get('candidates_selected', 0),
             'trades_executed': self.current_cycle.get('trades_executed', 0),
-            'metadata': {
-                'steps_completed': self.current_cycle.get('steps_completed', []),
-                'errors': self.current_cycle.get('errors', [])
-            }
+            'total_pnl': self.current_cycle.get('total_pnl', 0.0),
+            'errors': self.current_cycle.get('errors', []) if error else []
         }
-        
+
         if error:
             updates['error_message'] = error
         
@@ -587,13 +585,13 @@ class OrchestrationMCPServer:
     
     async def run(self):
         """Run the MCP server"""
-        self.logger.info("Starting Orchestration MCP Server", port=5009)
+        self.logger.info("Starting Orchestration MCP Server", port=5000)
         
         # Support both WebSocket and stdio transports
         if os.getenv('MCP_TRANSPORT', 'websocket') == 'stdio':
             transport = StdioTransport()
         else:
-            transport = WebSocketTransport(port=5009)
+            transport = WebSocketTransport(port=5000)
         
         await self.server.run(transport)
 

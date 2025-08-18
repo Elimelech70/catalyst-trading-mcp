@@ -3,7 +3,7 @@
 Name of Application: Catalyst Trading System
 Name of file: pattern-service.py
 Version: 3.0.0
-Last Updated: 2024-12-30
+Last Updated: 2025-08-18
 Purpose: MCP-enabled technical pattern detection with catalyst awareness
 
 REVISION HISTORY:
@@ -26,6 +26,7 @@ import json
 import time
 import asyncio
 import logging
+import psycopg2.extras
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
 import pandas as pd
@@ -41,9 +42,8 @@ from mcp.server import WebSocketTransport, StdioTransport
 # Import database utilities
 from database_utils import (
     get_db_connection,
-    insert_pattern_detection,
-    get_redis,
-    health_check
+    health_check,
+    log_workflow_step
 )
 
 # Handle technical analysis library imports
@@ -77,7 +77,11 @@ class PatternAnalysisMCPServer:
         self.setup_logging()
         
         # Initialize Redis client
-        self.redis_client = get_redis()
+        redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+        redis_password = os.getenv('REDIS_PASSWORD')
+        if redis_password and 'localhost' in redis_url:
+            redis_url = f'redis://:{redis_password}@localhost:6379/0'
+        self.redis_client = redis.Redis.from_url(redis_url, decode_responses=True)
         
         # Pattern configuration with catalyst weights
         self.pattern_config = self._load_pattern_config()
@@ -889,9 +893,30 @@ class PatternAnalysisMCPServer:
                 'detected_at': datetime.now()
             }
             
-            # Insert and return ID
-            insert_pattern_detection(db_data)
-            return 1  # Mock ID for now
+
+
+            # Insert pattern detection directly
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                     cur.execute("""
+                        INSERT INTO pattern_analysis (
+                            symbol, pattern_name, pattern_type,
+                            base_confidence, final_confidence,
+                            timeframe, metadata, detected_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s)
+                        RETURNING pattern_id
+                    """, (
+                        db_data['symbol'],
+                        db_data['pattern_name'],
+                        db_data['pattern_type'],
+                        db_data['base_confidence'],
+                        db_data['final_confidence'],
+                        db_data['timeframe'],
+                        json.dumps(db_data['metadata']),
+                        db_data['detected_at']
+                    ))
+                    pattern_id = cur.fetchone()[0]
+                    return pattern_id
             
         except Exception as e:
             self.logger.error("Failed to save pattern detection", error=str(e))
