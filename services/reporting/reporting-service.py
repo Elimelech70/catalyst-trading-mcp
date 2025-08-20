@@ -2,11 +2,17 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: reporting-service.py
-Version: 3.0.0
+Version: 3.0.1
 Last Updated: 2025-08-18
 Purpose: MCP-enabled analytics and reporting service for trading performance
 
 REVISION HISTORY:
+v3.0.1 (2025-08-18) - Fixed database connections and column names
+- Updated date to current
+- Fixed Redis password handling
+- Corrected database column names
+- Added missing imports
+
 v3.0.0 (2024-12-30) - Complete MCP migration
 - Converted from Flask REST to MCP protocol
 - Resources for all reporting and analytics data
@@ -42,7 +48,6 @@ import pandas as pd
 import numpy as np
 import psycopg2
 import psycopg2.extras
-from psycopg2.extras import RealDictCursor
 import redis
 from dotenv import load_dotenv
 
@@ -53,27 +58,6 @@ from mcp.server import WebSocketTransport, StdioTransport
 
 # Load environment variables
 load_dotenv()
-
-# Database connection utilities
-def get_db_connection():
-    """Get PostgreSQL database connection"""
-    try:
-        conn = psycopg2.connect(
-            os.getenv('DATABASE_URL', 'postgresql://catalyst_user:password@db:5432/catalyst_trading'),
-            cursor_factory=RealDictCursor
-        )
-        return conn
-    except Exception as e:
-        logger.error("Database connection failed", error=str(e))
-        raise
-
-def get_redis_connection():
-    """Get Redis connection for caching"""
-    try:
-        return redis.from_url(os.getenv('REDIS_URL', 'redis://redis:6379/0'))
-    except Exception as e:
-        logger.error("Redis connection failed", error=str(e))
-        return None
 
 # Configure structured logging
 log_path = os.getenv('LOG_PATH', '/app/logs')
@@ -89,6 +73,31 @@ logging.basicConfig(
 )
 
 logger = structlog.get_logger(__name__)
+
+# Database connection utilities
+def get_db_connection():
+    """Get PostgreSQL database connection"""
+    try:
+        conn = psycopg2.connect(
+            os.getenv('DATABASE_URL', 'postgresql://catalyst_user:password@db:5432/catalyst_trading'),
+            cursor_factory=psycopg2.extras.RealDictCursor
+        )
+        return conn
+    except Exception as e:
+        logger.error("Database connection failed", error=str(e))
+        raise
+
+def get_redis_connection():
+    """Get Redis connection for caching"""
+    try:
+        redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+        redis_password = os.getenv('REDIS_PASSWORD')
+        if redis_password and 'localhost' in redis_url:
+            redis_url = f'redis://:{redis_password}@localhost:6379/0'
+        return redis.from_url(redis_url, decode_responses=True)
+    except Exception as e:
+        logger.error("Redis connection failed", error=str(e))
+        return None
 
 @dataclass
 class PerformanceMetrics:
@@ -140,7 +149,7 @@ class ReportingMCPServer:
         self._register_resources()
         self._register_tools()
         
-        logger.info("Reporting MCP Server v3.0.0 initialized", port=self.port)
+        logger.info("Reporting MCP Server v3.0.1 initialized", port=self.port)
 
     def _register_resources(self):
         """Register MCP resources (read operations)"""
@@ -164,7 +173,7 @@ class ReportingMCPServer:
                         'service': self.service_name,
                         'database': 'healthy',
                         'redis': redis_status,
-                        'version': '3.0.0'
+                        'version': '3.0.1'
                     },
                     metadata={'timestamp': datetime.now(timezone.utc).isoformat()}
                 )
@@ -433,17 +442,17 @@ class ReportingMCPServer:
                 cur.execute("""
                     SELECT 
                         COUNT(*) as total_trades,
-                        SUM(CASE WHEN pnl_amount > 0 THEN 1 ELSE 0 END) as winning_trades,
-                        SUM(CASE WHEN pnl_amount < 0 THEN 1 ELSE 0 END) as losing_trades,
-                        SUM(pnl_amount) as total_pnl,
-                        AVG(CASE WHEN pnl_amount > 0 THEN pnl_amount END) as avg_win,
-                        AVG(CASE WHEN pnl_amount < 0 THEN pnl_amount END) as avg_loss,
-                        MAX(pnl_amount) as largest_win,
-                        MIN(pnl_amount) as largest_loss,
+                        SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as winning_trades,
+                        SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losing_trades,
+                        SUM(pnl) as total_pnl,
+                        AVG(CASE WHEN pnl > 0 THEN pnl END) as avg_win,
+                        AVG(CASE WHEN pnl < 0 THEN pnl END) as avg_loss,
+                        MAX(pnl) as largest_win,
+                        MIN(pnl) as largest_loss,
                         SUM(quantity) as total_volume
                     FROM trade_records 
-                    WHERE DATE(entry_timestamp) = %s
-                    AND exit_timestamp IS NOT NULL
+                    WHERE DATE(created_at) = %s
+                    AND closed_at IS NOT NULL
                 """, (target_date,))
                 
                 trade_stats = cur.fetchone()
@@ -465,9 +474,9 @@ class ReportingMCPServer:
                     SELECT 
                         pattern_type,
                         COUNT(*) as count,
-                        AVG(pattern_strength) as avg_confidence
+                        AVG(final_confidence) as avg_confidence
                     FROM pattern_analysis 
-                    WHERE DATE(detection_timestamp) = %s
+                    WHERE DATE(detected_at) = %s
                     GROUP BY pattern_type
                 """, (target_date,))
                 
@@ -542,9 +551,9 @@ class ReportingMCPServer:
                 # Get all closed trades in period
                 cur.execute("""
                     SELECT * FROM trade_records 
-                    WHERE entry_timestamp >= %s 
-                    AND exit_timestamp IS NOT NULL
-                    ORDER BY entry_timestamp
+                    WHERE created_at >= %s 
+                    AND closed_at IS NOT NULL
+                    ORDER BY created_at
                 """, (start_date,))
                 
                 closed_trades = cur.fetchall()
@@ -555,10 +564,10 @@ class ReportingMCPServer:
                     cur.execute("""
                         SELECT 
                             tr.*,
-                            current_timestamp - tr.entry_timestamp as position_age
+                            current_timestamp - tr.created_at as position_age
                         FROM trade_records tr
-                        WHERE tr.exit_timestamp IS NULL
-                        ORDER BY tr.entry_timestamp DESC
+                        WHERE tr.closed_at IS NULL
+                        ORDER BY tr.created_at DESC
                     """)
                     open_positions = cur.fetchall()
         
@@ -575,10 +584,10 @@ class ReportingMCPServer:
         
         # Calculate metrics
         total_trades = len(closed_trades)
-        winning_trades = len([t for t in closed_trades if (t['pnl_amount'] or 0) > 0])
-        losing_trades = len([t for t in closed_trades if (t['pnl_amount'] or 0) < 0])
+        winning_trades = len([t for t in closed_trades if (t['pnl'] or 0) > 0])
+        losing_trades = len([t for t in closed_trades if (t['pnl'] or 0) < 0])
         
-        pnls = [float(t['pnl_amount'] or 0) for t in closed_trades]
+        pnls = [float(t['pnl'] or 0) for t in closed_trades]
         wins = [p for p in pnls if p > 0]
         losses = [p for p in pnls if p < 0]
         
@@ -626,7 +635,7 @@ class ReportingMCPServer:
                     'entry_price': float(pos['entry_price'] or 0),
                     'stop_loss': float(pos['stop_loss'] or 0) if pos.get('stop_loss') else 0,
                     'take_profit': float(pos['take_profit'] or 0) if pos.get('take_profit') else 0,
-                    'entry_timestamp': pos['entry_timestamp'].isoformat() if pos['entry_timestamp'] else None,
+                    'created_at': pos['created_at'].isoformat() if pos['created_at'] else None,
                     'position_age_hours': pos['position_age'].total_seconds() / 3600 if pos['position_age'] else 0
                 })
             open_positions = formatted_positions
@@ -660,18 +669,18 @@ class ReportingMCPServer:
                     SELECT 
                         pa.pattern_type,
                         pa.symbol,
-                        pa.pattern_strength as confidence,
-                        pa.detection_timestamp as created_at,
-                        tr.pnl_amount as pnl,
-                        tr.entry_timestamp
+                        pa.final_confidence as confidence,
+                        pa.detected_at as created_at,
+                        tr.pnl as pnl,
+                        tr.created_at as entry_timestamp
                     FROM pattern_analysis pa
                     LEFT JOIN trading_candidates tc ON pa.symbol = tc.symbol 
-                        AND DATE(pa.detection_timestamp) = DATE(tc.created_at)
+                        AND DATE(pa.detected_at) = DATE(tc.created_at)
                     LEFT JOIN trade_records tr ON tc.symbol = tr.symbol 
-                        AND tr.entry_timestamp >= pa.detection_timestamp
-                        AND tr.entry_timestamp <= pa.detection_timestamp + INTERVAL '24 hours'
-                        AND tr.exit_timestamp IS NOT NULL
-                    WHERE pa.detection_timestamp >= %s
+                        AND tr.created_at >= pa.detected_at
+                        AND tr.created_at <= pa.detected_at + INTERVAL '24 hours'
+                        AND tr.closed_at IS NOT NULL
+                    WHERE pa.detected_at >= %s
                 """
                 
                 params = [start_date]
@@ -772,21 +781,21 @@ class ReportingMCPServer:
                         SUM(ABS(quantity * entry_price)) as total_exposure,
                         MAX(ABS(quantity * entry_price)) as max_position_value
                     FROM trade_records 
-                    WHERE exit_timestamp IS NULL
+                    WHERE closed_at IS NULL
                 """)
                 
                 position_data = cur.fetchone()
                 
                 # Recent P&L for VaR calculation
                 cur.execute("""
-                    SELECT pnl_amount 
+                    SELECT pnl 
                     FROM trade_records 
-                    WHERE entry_timestamp >= NOW() - INTERVAL '30 days'
-                    AND exit_timestamp IS NOT NULL
-                    ORDER BY entry_timestamp
+                    WHERE created_at >= NOW() - INTERVAL '30 days'
+                    AND closed_at IS NOT NULL
+                    ORDER BY created_at
                 """)
                 
-                recent_pnls = [float(row['pnl_amount'] or 0) for row in cur.fetchall()]
+                recent_pnls = [float(row['pnl'] or 0) for row in cur.fetchall()]
         
         # Calculate VaR (95% confidence)
         var_95 = 0
@@ -823,11 +832,11 @@ class ReportingMCPServer:
                         tr.entry_price,
                         tr.stop_loss,
                         tr.take_profit,
-                        tr.entry_timestamp,
-                        CURRENT_TIMESTAMP - tr.entry_timestamp as position_age
+                        tr.created_at,
+                        CURRENT_TIMESTAMP - tr.created_at as position_age
                     FROM trade_records tr
-                    WHERE tr.exit_timestamp IS NULL
-                    ORDER BY tr.entry_timestamp DESC
+                    WHERE tr.closed_at IS NULL
+                    ORDER BY tr.created_at DESC
                 """)
                 
                 positions = cur.fetchall()
@@ -837,11 +846,11 @@ class ReportingMCPServer:
                     SELECT 
                         symbol,
                         COUNT(*) as trade_count,
-                        SUM(pnl_amount) as total_pnl,
-                        AVG(pnl_amount) as avg_pnl
+                        SUM(pnl) as total_pnl,
+                        AVG(pnl) as avg_pnl
                     FROM trade_records 
-                    WHERE entry_timestamp >= NOW() - INTERVAL '30 days'
-                    AND exit_timestamp IS NOT NULL
+                    WHERE created_at >= NOW() - INTERVAL '30 days'
+                    AND closed_at IS NOT NULL
                     GROUP BY symbol
                     ORDER BY total_pnl DESC
                 """)
@@ -934,7 +943,7 @@ class ReportingMCPServer:
             with conn.cursor() as cur:
                 query = """
                     SELECT * FROM trade_records 
-                    WHERE entry_timestamp >= %s
+                    WHERE created_at >= %s
                 """
                 params = [start_date]
                 
@@ -943,11 +952,11 @@ class ReportingMCPServer:
                     params.append(symbol)
                 
                 if status == 'closed':
-                    query += " AND exit_timestamp IS NOT NULL"
+                    query += " AND closed_at IS NOT NULL"
                 elif status == 'open':
-                    query += " AND exit_timestamp IS NULL"
+                    query += " AND closed_at IS NULL"
                 
-                query += " ORDER BY entry_timestamp DESC"
+                query += " ORDER BY created_at DESC"
                 
                 cur.execute(query, params)
                 trades = cur.fetchall()
@@ -961,10 +970,10 @@ class ReportingMCPServer:
                 'quantity': trade['quantity'],
                 'entry_price': float(trade['entry_price'] or 0),
                 'exit_price': float(trade['exit_price'] or 0) if trade['exit_price'] else None,
-                'entry_timestamp': trade['entry_timestamp'].isoformat() if trade['entry_timestamp'] else None,
-                'exit_timestamp': trade['exit_timestamp'].isoformat() if trade['exit_timestamp'] else None,
-                'pnl': float(trade['pnl_amount'] or 0) if trade['pnl_amount'] else None,
-                'status': 'closed' if trade['exit_timestamp'] else 'open'
+                'created_at': trade['created_at'].isoformat() if trade['created_at'] else None,
+                'closed_at': trade['closed_at'].isoformat() if trade['closed_at'] else None,
+                'pnl': float(trade['pnl'] or 0) if trade['pnl'] else None,
+                'status': 'closed' if trade['closed_at'] else 'open'
             })
         
         return formatted_trades
@@ -979,14 +988,14 @@ class ReportingMCPServer:
                     SELECT 
                         symbol,
                         COUNT(*) as trade_count,
-                        SUM(CASE WHEN pnl_amount > 0 THEN 1 ELSE 0 END) as winning_trades,
-                        SUM(pnl_amount) as total_pnl,
-                        AVG(pnl_amount) as avg_pnl,
-                        MAX(pnl_amount) as best_trade,
-                        MIN(pnl_amount) as worst_trade
+                        SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as winning_trades,
+                        SUM(pnl) as total_pnl,
+                        AVG(pnl) as avg_pnl,
+                        MAX(pnl) as best_trade,
+                        MIN(pnl) as worst_trade
                     FROM trade_records 
-                    WHERE entry_timestamp >= %s
-                    AND exit_timestamp IS NOT NULL
+                    WHERE created_at >= %s
+                    AND closed_at IS NOT NULL
                     GROUP BY symbol
                     HAVING COUNT(*) >= %s
                     ORDER BY total_pnl DESC
@@ -1070,13 +1079,13 @@ class ReportingMCPServer:
         # Group trades by date and sum P&L
         daily_pnl = {}
         for trade in trades:
-            date = trade['entry_timestamp'].date() if hasattr(trade['entry_timestamp'], 'date') else trade['entry_timestamp']
+            date = trade['created_at'].date() if hasattr(trade['created_at'], 'date') else trade['created_at']
             if isinstance(date, str):
                 date = datetime.strptime(date.split()[0], '%Y-%m-%d').date()
             
             if date not in daily_pnl:
                 daily_pnl[date] = 0
-            daily_pnl[date] += float(trade['pnl_amount'] or 0)
+            daily_pnl[date] += float(trade['pnl'] or 0)
         
         return list(daily_pnl.values())
 
@@ -1198,7 +1207,7 @@ class ReportingMCPServer:
     async def run(self):
         """Start the MCP server"""
         logger.info("Starting Reporting MCP Server",
-                   version="3.0.0",
+                   version="3.0.1",
                    port=self.port)
         
         # Create WebSocket transport

@@ -2,14 +2,11 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: scanner-service.py
-Version: 4.0.1
-Last Updated: 2025-01-31
+Version: 4.0.0
+Last Updated: 2024-12-30
 Purpose: MCP-enabled security scanner with comprehensive market data collection
 
 REVISION HISTORY:
-v4.0.1 (2025-01-31) - Fixed database_utils import issue
-- Removed dependency on non-existent database_utils module
-- Implemented database functions directly in service
 v4.0.0 (2024-12-30) - Complete MCP migration
 - Converted from Flask REST to MCP protocol
 - Resources for market data and candidate access
@@ -43,7 +40,7 @@ import numpy as np
 from alpaca_trade_api import REST
 import redis
 import psycopg2
-from psycopg2.extras import RealDictCursor, execute_batch, Json as PgJson
+from psycopg2.extras import RealDictCursor, execute_batch
 from psycopg2.pool import ThreadedConnectionPool
 import structlog
 
@@ -59,6 +56,14 @@ try:
 except ImportError:
     TALIB_AVAILABLE = False
     print("WARNING: TA-Lib not available, using fallback calculations")
+
+# Import database utilities
+from database_utils import (
+    get_db_connection, 
+    health_check,
+    get_active_candidates,
+    insert_trading_candidate
+)
 
 
 class ScannerMCPServer:
@@ -130,7 +135,7 @@ class ScannerMCPServer:
         self._register_resources()
         self._register_tools()
         
-        self.logger.info("Scanner MCP Server v4.0.1 initialized",
+        self.logger.info("Scanner MCP Server v4.0.0 initialized",
                         environment=os.getenv('ENVIRONMENT', 'development'),
                         tracking_size=self.scan_params['top_tracking_size'],
                         data_source="Alpaca Markets")
@@ -896,67 +901,29 @@ class ScannerMCPServer:
 
     async def _save_trading_candidate(self, candidate: Dict, scan_id: str) -> bool:
         """Save trading candidate to database"""
-        conn = None
         try:
-            conn = self.db_pool.getconn()
-            with conn.cursor() as cursor:
-                # Create table if needed
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS trading_candidates (
-                        candidate_id SERIAL PRIMARY KEY,
-                        symbol VARCHAR(10) NOT NULL,
-                        scan_id VARCHAR(100),
-                        scan_type VARCHAR(50),
-                        catalyst_score DECIMAL(10,2),
-                        catalyst_type VARCHAR(100),
-                        primary_news_id VARCHAR(100),
-                        volume_ratio DECIMAL(10,2),
-                        price_change_pct DECIMAL(10,2),
-                        market_cap BIGINT,
-                        selection_rank INTEGER,
-                        metadata JSONB,
-                        created_at TIMESTAMPTZ DEFAULT NOW(),
-                        status VARCHAR(50) DEFAULT 'pending'
-                    )
-                """)
-                
-                # Insert candidate
-                cursor.execute("""
-                    INSERT INTO trading_candidates 
-                    (symbol, scan_id, scan_type, catalyst_score, catalyst_type, 
-                     primary_news_id, volume_ratio, price_change_pct, market_cap, 
-                     selection_rank, metadata)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """, (
-                    candidate.get('symbol'),
-                    scan_id,
-                    'enhanced',
-                    candidate.get('composite_score', 0),
-                    candidate.get('catalyst_type'),
-                    candidate.get('primary_news_id'),
-                    candidate.get('relative_volume', 1.0),
-                    candidate.get('price_change_pct', 0),
-                    candidate.get('market_cap', 0),
-                    candidate.get('rank', 0),
-                    PgJson({
-                        'scan_id': scan_id,
-                        'scan_timestamp': candidate.get('scan_timestamp', datetime.now()).isoformat(),
-                        'has_news': candidate.get('has_news', False),
-                        'news_count': candidate.get('news_count', 0)
-                    })
-                ))
-                
-                conn.commit()
-                return True
-                
+            candidate_data = {
+                'symbol': candidate.get('symbol'),
+                'scan_type': 'enhanced',
+                'catalyst_score': candidate.get('composite_score', 0),
+                'catalyst_type': candidate.get('catalyst_type'),
+                'primary_news_id': candidate.get('primary_news_id'),
+                'volume_ratio': candidate.get('relative_volume', 1.0),
+                'price_change_pct': candidate.get('price_change_pct', 0),
+                'market_cap': candidate.get('market_cap', 0),
+                'selection_rank': candidate.get('rank', 0),
+                'metadata': {
+                    'scan_id': scan_id,
+                    'scan_timestamp': candidate.get('scan_timestamp', datetime.now()).isoformat(),
+                    'has_news': candidate.get('has_news', False),
+                    'news_count': candidate.get('news_count', 0)
+                }
+            }
+            insert_trading_candidate(candidate_data)
+            return True
         except Exception as e:
             self.logger.error(f"Error saving candidate {candidate.get('symbol')}", error=str(e))
-            if conn:
-                conn.rollback()
             return False
-        finally:
-            if conn:
-                self.db_pool.putconn(conn)
 
     async def _store_comprehensive_scan_data(self, securities: List[Dict], scan_id: str):
         """Store comprehensive scan data for ALL tracked securities"""
@@ -1173,140 +1140,35 @@ class ScannerMCPServer:
 
     async def _get_active_candidates_from_db(self, scan_id: Optional[str]) -> List[Dict]:
         """Get active candidates from database"""
-        conn = None
-        try:
-            conn = self.db_pool.getconn()
-            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                if scan_id:
-                    cursor.execute("""
-                        SELECT * FROM trading_candidates 
-                        WHERE scan_id = %s 
-                        ORDER BY selection_rank
-                    """, (scan_id,))
-                else:
-                    cursor.execute("""
-                        SELECT * FROM trading_candidates 
-                        WHERE created_at > NOW() - INTERVAL '24 hours'
-                        AND status = 'pending'
-                        ORDER BY created_at DESC, selection_rank
-                        LIMIT 10
-                    """)
-                    
-                return cursor.fetchall()
-        except Exception as e:
-            self.logger.error("Error getting active candidates", error=str(e))
-            return []
-        finally:
-            if conn:
-                self.db_pool.putconn(conn)
+        # This would query the trading_candidates table
+        # For now, return empty list
+        return []
 
     async def _get_scan_history(self, date: Optional[str], symbol: Optional[str], 
                               limit: int) -> List[Dict]:
         """Get scan history from database"""
-        conn = None
-        try:
-            conn = self.db_pool.getconn()
-            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                query = "SELECT * FROM scan_market_data WHERE 1=1"
-                params = []
-                
-                if date:
-                    query += " AND DATE(scan_timestamp) = %s"
-                    params.append(date)
-                    
-                if symbol:
-                    query += " AND symbol = %s"
-                    params.append(symbol)
-                    
-                query += " ORDER BY scan_timestamp DESC LIMIT %s"
-                params.append(limit)
-                
-                cursor.execute(query, params)
-                return cursor.fetchall()
-        except Exception as e:
-            self.logger.error("Error getting scan history", error=str(e))
-            return []
-        finally:
-            if conn:
-                self.db_pool.putconn(conn)
+        # This would query historical scan data
+        # For now, return empty list
+        return []
 
     async def _get_last_scan_info(self) -> Dict:
         """Get information about the last scan"""
-        conn = None
-        try:
-            conn = self.db_pool.getconn()
-            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute("""
-                    SELECT scan_id, MIN(scan_timestamp) as timestamp, 
-                           COUNT(DISTINCT symbol) as total_scanned,
-                           SUM(CASE WHEN selected_for_trading THEN 1 ELSE 0 END) as candidates_selected
-                    FROM scan_market_data
-                    WHERE scan_timestamp > NOW() - INTERVAL '24 hours'
-                    GROUP BY scan_id
-                    ORDER BY MIN(scan_timestamp) DESC
-                    LIMIT 1
-                """)
-                
-                result = cursor.fetchone()
-                if result:
-                    return {
-                        "scan_id": result['scan_id'],
-                        "timestamp": result['timestamp'].isoformat(),
-                        "total_scanned": result['total_scanned'],
-                        "candidates_selected": result['candidates_selected']
-                    }
-                    
-                return {
-                    "scan_id": None,
-                    "timestamp": datetime.now().isoformat(),
-                    "candidates_selected": 0
-                }
-        except Exception as e:
-            self.logger.error("Error getting last scan info", error=str(e))
-            return {
-                "scan_id": None,
-                "error": str(e)
-            }
-        finally:
-            if conn:
-                self.db_pool.putconn(conn)
+        # This would query for the most recent scan
+        return {
+            "scan_id": "SCAN_20241230_093000_normal",
+            "timestamp": datetime.now().isoformat(),
+            "candidates_selected": 5
+        }
 
     async def _get_scanner_performance_metrics(self, days: int) -> Dict:
         """Get scanner performance metrics"""
-        conn = None
-        try:
-            conn = self.db_pool.getconn()
-            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute("""
-                    SELECT 
-                        COUNT(DISTINCT scan_id) as scans_performed,
-                        AVG(EXTRACT(EPOCH FROM (MAX(scan_timestamp) - MIN(scan_timestamp)))) as avg_execution_time
-                    FROM scan_market_data
-                    WHERE scan_timestamp > NOW() - INTERVAL '%s days'
-                    GROUP BY scan_id
-                """, (days,))
-                
-                metrics = cursor.fetchone() or {
-                    "scans_performed": 0,
-                    "avg_execution_time": 0
-                }
-                
-                # Calculate success rate (simplified - you'd want actual trade outcomes)
-                metrics["success_rate"] = 0.75  # Placeholder
-                metrics["top_performing_picks"] = []  # Would need trade results
-                
-                return metrics
-        except Exception as e:
-            self.logger.error("Error getting performance metrics", error=str(e))
-            return {
-                "scans_performed": 0,
-                "avg_execution_time": 0,
-                "success_rate": 0,
-                "top_performing_picks": []
-            }
-        finally:
-            if conn:
-                self.db_pool.putconn(conn)
+        # This would calculate scanner performance
+        return {
+            "scans_performed": 0,
+            "avg_execution_time": 0,
+            "success_rate": 0,
+            "top_performing_picks": []
+        }
 
     # Default universe
     default_universe = [
@@ -1321,7 +1183,7 @@ class ScannerMCPServer:
     async def run(self):
         """Start the MCP server"""
         self.logger.info("Starting Scanner MCP Server",
-                        version="4.0.1",
+                        version="4.0.0",
                         port=self.port,
                         environment=os.getenv('ENVIRONMENT', 'development'))
         
