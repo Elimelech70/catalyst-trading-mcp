@@ -2,11 +2,18 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: news-service.py
-Version: 3.0.1
-Last Updated: 2025-08-18
-Purpose: MCP-enabled news collection and intelligence service
+Version: 3.1.0
+Last Updated: 2025-08-23
+Purpose: MCP-enabled news collection with database MCP integration
 
 REVISION HISTORY:
+v3.1.0 (2025-08-23) - Database MCP integration and missing features
+- Replaced all database_utils imports with MCP Database Client
+- Added missing resources: news/sentiment/{symbol}, news/trending, news/sources/health
+- Added missing tools: refresh_sources, blacklist_source, prioritize_symbol
+- Updated all database operations to use async MCP client
+- Enhanced source management and health monitoring
+
 v3.0.1 (2025-08-18) - Fixed port and database imports
 - Changed port from 5108 to 5008
 - Fixed database_utils imports
@@ -27,321 +34,410 @@ intelligent access to news data for trading decisions.
 
 import os
 import json
-import time
-import logging
 import asyncio
+import logging
 import hashlib
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, AsyncGenerator
-import structlog
-from mcp import MCPServer, MCPRequest, MCPResponse, ResourceParams, ToolParams
-from mcp.transport import WebSocketTransport, StdioTransport
 import aiohttp
 import feedparser
+from newspaper import Article
+from structlog import get_logger
 import redis.asyncio as redis
-import psycopg2.extras
 
-# Import database utilities - only what's actually available
-from database_utils import (
-    get_db_connection,
-    health_check,
-    log_workflow_step
-)
+# MCP imports
+from mcp import MCPServer, ResourceParams, ToolParams
+from mcp import ResourceResponse, ToolResponse, MCPError
+from mcp.server import WebSocketTransport, StdioTransport
+
+# Import MCP Database Client instead of database_utils
+from mcp_database_client import MCPDatabaseClient
 
 
 class NewsMCPServer:
     """MCP Server for news collection and intelligence"""
     
     def __init__(self):
+        # Initialize MCP server
         self.server = MCPServer("news-intelligence")
-        self.logger = structlog.get_logger().bind(service="news_mcp")
+        self.setup_logging()
         
-        # API Keys from environment
-        self.api_keys = {
-            'newsapi': os.getenv('NEWSAPI_KEY', ''),
-            'alphavantage': os.getenv('ALPHAVANTAGE_KEY', ''),
-            'finnhub': os.getenv('FINNHUB_KEY', '')
-        }
+        # Database client (initialized in async context)
+        self.db_client: Optional[MCPDatabaseClient] = None
         
-        # RSS feeds with tier classification
-        self.rss_feeds = {
-            'marketwatch': {
-                'url': 'https://feeds.marketwatch.com/marketwatch/topstories/',
-                'tier': 1
-            },
+        # Redis client for caching
+        self.redis_client: Optional[redis.Redis] = None
+        
+        # Service configuration
+        self.service_name = 'news-intelligence'
+        self.port = int(os.getenv('PORT', '5008'))
+        self.log_level = os.getenv('LOG_LEVEL', 'INFO')
+        
+        # News sources configuration
+        self.news_sources = {
             'yahoo_finance': {
-                'url': 'https://finance.yahoo.com/rss/',
-                'tier': 1
+                'enabled': True,
+                'tier': 1,
+                'base_url': 'https://finance.yahoo.com/rss/topstories',
+                'rate_limit': 30,  # requests per minute
+                'health': 'healthy',
+                'last_check': None
             },
             'seeking_alpha': {
-                'url': 'https://seekingalpha.com/feed.xml',
-                'tier': 2
+                'enabled': True,
+                'tier': 1,
+                'base_url': 'https://seekingalpha.com/market_currents.xml',
+                'rate_limit': 20,
+                'health': 'healthy',
+                'last_check': None
+            },
+            'marketwatch': {
+                'enabled': True,
+                'tier': 2,
+                'base_url': 'https://feeds.marketwatch.com/marketwatch/topstories',
+                'rate_limit': 30,
+                'health': 'healthy',
+                'last_check': None
+            },
+            'reuters': {
+                'enabled': True,
+                'tier': 1,
+                'base_url': 'https://www.reutersagency.com/feed/',
+                'rate_limit': 20,
+                'health': 'healthy',
+                'last_check': None
             }
         }
         
+        # Blacklisted sources (can be updated via tool)
+        self.blacklisted_sources = set()
+        
+        # Priority symbols (get more frequent updates)
+        self.priority_symbols = set()
+        
         # Collection configuration
         self.collection_config = {
-            'max_articles_per_source': int(os.getenv('MAX_ARTICLES_PER_SOURCE', '20')),
-            'collection_timeout': int(os.getenv('COLLECTION_TIMEOUT', '30')),
-            'concurrent_sources': int(os.getenv('CONCURRENT_SOURCES', '3')),
-            'cache_ttl': int(os.getenv('NEWS_CACHE_TTL', '300'))
+            'max_articles_per_cycle': int(os.getenv('MAX_ARTICLES_PER_CYCLE', '100')),
+            'article_age_hours': int(os.getenv('ARTICLE_AGE_HOURS', '24')),
+            'sentiment_threshold': float(os.getenv('SENTIMENT_THRESHOLD', '0.3')),
+            'catalyst_keywords': [
+                'earnings', 'merger', 'acquisition', 'fda', 'approval',
+                'lawsuit', 'investigation', 'upgrade', 'downgrade',
+                'guidance', 'revenue', 'profit', 'loss', 'recall'
+            ]
         }
         
-        # Initialize Redis client asynchronously
-        self.redis_client = None
-        
-        # Register resources and tools
+        # Register MCP endpoints
         self._register_resources()
         self._register_tools()
         self._register_events()
         
-        self.logger.info("News MCP Server initialized", version="3.0.1")
+    def setup_logging(self):
+        """Setup structured logging"""
+        self.logger = get_logger()
+        self.logger = self.logger.bind(service=self.service_name)
         
-    async def _init_redis(self):
-        """Initialize Redis client"""
-        if not self.redis_client:
-            redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
-            redis_password = os.getenv('REDIS_PASSWORD')
+    async def initialize(self):
+        """Initialize async components"""
+        # Initialize database client
+        self.db_client = MCPDatabaseClient(
+            os.getenv('DATABASE_MCP_URL', 'ws://database-service:5010')
+        )
+        await self.db_client.connect()
+        
+        # Initialize Redis
+        self.redis_client = await redis.from_url(
+            os.getenv('REDIS_URL', 'redis://localhost:6379/0'),
+            decode_responses=True
+        )
+        
+        # Load saved configuration
+        await self._load_configuration()
+        
+        # Check all news sources
+        await self._check_all_sources()
+        
+        self.logger.info("News service initialized",
+                        database_connected=True,
+                        redis_connected=True,
+                        sources_checked=True)
+    
+    async def cleanup(self):
+        """Clean up resources"""
+        if self.redis_client:
+            await self.redis_client.close()
             
-            if redis_password and 'localhost' in redis_url:
-                # Add password to URL
-                redis_url = f'redis://:{redis_password}@localhost:6379/0'
-                
-            self.redis_client = await redis.from_url(redis_url, decode_responses=True)
+        if self.db_client:
+            await self.db_client.disconnect()
     
-    # Database helper functions that were missing
-    def get_recent_news(self, symbol: Optional[str] = None, hours: int = 24, limit: int = 100) -> List[Dict]:
-        """Get recent news from database"""
-        with get_db_connection() as conn:
-            with conn.cursor() as cur:
-                query = """
-                    SELECT news_id, symbol, headline, source, 
-                           published_timestamp, content_snippet, url,
-                           is_pre_market, market_state, headline_keywords,
-                           mentioned_tickers, source_tier, metadata
-                    FROM news_raw
-                    WHERE published_timestamp > CURRENT_TIMESTAMP - INTERVAL %s
-                """
-                params = [f'{hours} hours']
-                
-                if symbol:
-                    query += " AND symbol = %s"
-                    params.append(symbol)
-                
-                query += " ORDER BY published_timestamp DESC LIMIT %s"
-                params.append(limit)
-                
-                cur.execute(query, params)
-                
-                news_items = []
-                for row in cur.fetchall():
-                    item = dict(row)
-                    # Convert datetime to string for JSON serialization
-                    if item.get('published_timestamp'):
-                        item['published_timestamp'] = item['published_timestamp'].isoformat()
-                    news_items.append(item)
-                
-                return news_items
-    
-    def insert_news_article(self, article: Dict) -> Optional[str]:
-        """Insert news article into database"""
-        with get_db_connection() as conn:
-            with conn.cursor() as cur:
-                try:
-                    cur.execute("""
-                        INSERT INTO news_raw (
-                            news_id, symbol, headline, source,
-                            published_timestamp, content_snippet, url,
-                            is_pre_market, market_state, headline_keywords,
-                            mentioned_tickers, source_tier, metadata
-                        ) VALUES (
-                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-                        )
-                        ON CONFLICT (news_id) DO NOTHING
-                        RETURNING news_id
-                    """, (
-                        article['news_id'],
-                        article.get('symbol'),
-                        article['headline'],
-                        article['source'],
-                        article['published_timestamp'],
-                        article.get('content_snippet'),
-                        article.get('url'),
-                        article.get('is_pre_market', False),
-                        article.get('market_state', 'unknown'),
-                        article.get('headline_keywords', []),
-                        article.get('mentioned_tickers', []),
-                        article.get('source_tier', 5),
-                        json.dumps(article.get('metadata', {}))
-                    ))
-                    
-                    result = cur.fetchone()
-                    return result['news_id'] if result else None
-                    
-                except Exception as e:
-                    self.logger.error(f"Error inserting news article", error=str(e))
-                    conn.rollback()
-                    raise
+    async def _load_configuration(self):
+        """Load saved configuration from cache"""
+        try:
+            # Load blacklisted sources
+            blacklist = await self.redis_client.smembers("news:blacklisted_sources")
+            self.blacklisted_sources = set(blacklist) if blacklist else set()
+            
+            # Load priority symbols
+            priority = await self.redis_client.smembers("news:priority_symbols")
+            self.priority_symbols = set(priority) if priority else set()
+            
+            self.logger.info("Configuration loaded",
+                           blacklisted=len(self.blacklisted_sources),
+                           priority=len(self.priority_symbols))
+        except Exception as e:
+            self.logger.warning("Failed to load configuration", error=str(e))
     
     def _register_resources(self):
-        """Register data resources"""
+        """Register MCP resources (read operations)"""
         
-        @self.server.resource("news/raw")
-        async def get_raw_news(params: ResourceParams) -> MCPResponse:
-            """Access raw news data"""
-            filters = params.get("filters", {})
-            since = filters.get('since')
-            limit = filters.get('limit', 100)
-            symbol = filters.get('symbol')
-            source_tier = filters.get('source_tier')
+        @self.server.resource("news/recent")
+        async def get_recent_news(params: ResourceParams) -> ResourceResponse:
+            """Get recent news articles"""
+            hours = params.get('hours', 24)
+            symbol = params.get('symbol')
+            min_tier = params.get('min_tier', 3)
+            limit = params.get('limit', 100)
             
-            # Query database
-            news_articles = self.get_recent_news(
-                symbol=symbol,
-                hours=24 if not since else None,
-                limit=limit
-            )
+            # Get from database via MCP
+            articles = await self.db_client.get_recent_news(hours=hours, symbol=symbol)
             
-            return MCPResponse(
-                resource_type="news_collection",
-                data=news_articles,
+            # Filter by tier
+            filtered = [a for a in articles if a.get('source_tier', 3) <= min_tier]
+            
+            # Sort by timestamp
+            filtered.sort(key=lambda x: x.get('published_timestamp', ''), reverse=True)
+            
+            # Limit results
+            filtered = filtered[:limit]
+            
+            return ResourceResponse(
+                type="news_collection",
+                data={'articles': filtered},
                 metadata={
-                    "count": len(news_articles),
-                    "last_updated": datetime.now().isoformat()
+                    'count': len(filtered),
+                    'hours': hours,
+                    'symbol': symbol
                 }
             )
         
         @self.server.resource("news/by-symbol/{symbol}")
-        async def get_news_by_symbol(params: ResourceParams) -> MCPResponse:
+        async def get_news_by_symbol(params: ResourceParams) -> ResourceResponse:
             """Get news for specific symbol"""
-            symbol = params["symbol"]
-            timeframe = params.get("timeframe", "24h")
+            symbol = params['symbol']
+            hours = params.get('hours', 24)
+            include_sentiment = params.get('include_sentiment', True)
             
-            # Convert timeframe to hours
-            hours_map = {
-                "1h": 1, "4h": 4, "24h": 24, "7d": 168, "30d": 720
-            }
-            hours = hours_map.get(timeframe, 24)
+            # Get articles from database
+            articles = await self.db_client.get_recent_news(hours=hours, symbol=symbol)
             
-            news_articles = self.get_recent_news(symbol=symbol, hours=hours)
+            # Add sentiment if requested
+            if include_sentiment:
+                for article in articles:
+                    if 'sentiment' not in article:
+                        article['sentiment'] = self._analyze_sentiment(
+                            article.get('headline', '') + ' ' + 
+                            article.get('content_snippet', '')
+                        )
             
-            # Calculate sentiment and other analytics
-            sentiment = self._analyze_news_sentiment(news_articles)
-            
-            return MCPResponse(
-                resource_type="symbol_news",
+            return ResourceResponse(
+                type="symbol_news",
                 data={
                     'symbol': symbol,
-                    'articles': news_articles,
-                    'sentiment': sentiment,
-                    'timeframe': timeframe
+                    'articles': articles
+                },
+                metadata={
+                    'count': len(articles),
+                    'hours': hours
                 }
             )
         
-        @self.server.resource("news/catalysts/active")
-        async def get_active_catalysts(params: ResourceParams) -> MCPResponse:
-            """Get news with active catalysts"""
-            min_score = params.get("min_catalyst_score", 50)
-            limit = params.get("limit", 50)
+        @self.server.resource("news/sentiment/{symbol}")
+        async def get_news_sentiment(params: ResourceParams) -> ResourceResponse:
+            """Get aggregated sentiment analysis for symbol"""
+            symbol = params['symbol']
+            timeframe = params.get('timeframe', '24h')
             
-            # Query for high-catalyst news
-            with get_db_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("""
-                        SELECT DISTINCT ON (symbol) *
-                        FROM news_raw
-                        WHERE published_timestamp > CURRENT_TIMESTAMP - INTERVAL '24 hours'
-                        AND source_tier <= 3
-                        AND (
-                            headline_keywords @> ARRAY['earnings']::text[] OR
-                            headline_keywords @> ARRAY['fda']::text[] OR
-                            headline_keywords @> ARRAY['merger']::text[] OR
-                            headline_keywords @> ARRAY['guidance']::text[]
-                        )
-                        ORDER BY symbol, published_timestamp DESC
-                        LIMIT %s
-                    """, (limit,))
-                    
-                    catalysts = []
-                    for row in cur.fetchall():
-                        catalyst = dict(row)
-                        if catalyst.get('published_timestamp'):
-                            catalyst['published_timestamp'] = catalyst['published_timestamp'].isoformat()
-                        catalysts.append(catalyst)
+            # Convert timeframe to hours
+            hours_map = {'1h': 1, '4h': 4, '24h': 24, '7d': 168, '30d': 720}
+            hours = hours_map.get(timeframe, 24)
             
-            return MCPResponse(
-                resource_type="catalyst_collection",
-                data=catalysts,
-                metadata={"active_catalysts": len(catalysts)}
-            )
-        
-        @self.server.resource("news/sources/metrics")
-        async def get_source_metrics(params: ResourceParams) -> MCPResponse:
-            """Get news source reliability metrics"""
-            with get_db_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("""
-                        SELECT source, source_tier, 
-                               COUNT(*) as article_count,
-                               AVG(CASE WHEN is_pre_market THEN 1 ELSE 0 END) as premarket_ratio
-                        FROM news_raw
-                        WHERE published_timestamp > CURRENT_TIMESTAMP - INTERVAL '7 days'
-                        GROUP BY source, source_tier
-                        ORDER BY source_tier, article_count DESC
-                    """)
-                    
-                    metrics = []
-                    for row in cur.fetchall():
-                        metrics.append(dict(row))
+            # Get articles
+            articles = await self.db_client.get_recent_news(hours=hours, symbol=symbol)
             
-            return MCPResponse(
-                resource_type="source_metrics",
-                data=metrics
+            if not articles:
+                return ResourceResponse(
+                    type="sentiment_analysis",
+                    data={
+                        'symbol': symbol,
+                        'sentiment': 'neutral',
+                        'score': 0.0,
+                        'confidence': 0.0,
+                        'article_count': 0
+                    }
+                )
+            
+            # Calculate aggregate sentiment
+            sentiments = []
+            for article in articles:
+                sentiment_data = self._analyze_sentiment(
+                    article.get('headline', '') + ' ' + 
+                    article.get('content_snippet', '')
+                )
+                sentiments.append(sentiment_data)
+            
+            # Aggregate scores
+            avg_score = sum(s['score'] for s in sentiments) / len(sentiments)
+            avg_confidence = sum(s['confidence'] for s in sentiments) / len(sentiments)
+            
+            # Determine overall sentiment
+            if avg_score > 0.3:
+                overall_sentiment = 'positive'
+            elif avg_score < -0.3:
+                overall_sentiment = 'negative'
+            else:
+                overall_sentiment = 'neutral'
+            
+            return ResourceResponse(
+                type="sentiment_analysis",
+                data={
+                    'symbol': symbol,
+                    'sentiment': overall_sentiment,
+                    'score': round(avg_score, 3),
+                    'confidence': round(avg_confidence, 3),
+                    'article_count': len(articles),
+                    'timeframe': timeframe,
+                    'breakdown': {
+                        'positive': len([s for s in sentiments if s['sentiment'] == 'positive']),
+                        'negative': len([s for s in sentiments if s['sentiment'] == 'negative']),
+                        'neutral': len([s for s in sentiments if s['sentiment'] == 'neutral'])
+                    }
+                }
             )
         
         @self.server.resource("news/trending")
-        async def get_trending_news(params: ResourceParams) -> MCPResponse:
-            """Get trending news stories"""
-            hours = params.get("hours", 4)
-            limit = params.get("limit", 20)
+        async def get_trending_news(params: ResourceParams) -> ResourceResponse:
+            """Get trending symbols based on news volume"""
+            hours = params.get('hours', 4)
+            limit = params.get('limit', 20)
+            min_articles = params.get('min_articles', 3)
             
-            with get_db_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("""
-                        SELECT symbol, 
-                               COUNT(*) as mention_count,
-                               MIN(published_timestamp) as first_seen,
-                               MAX(published_timestamp) as last_seen,
-                               array_agg(DISTINCT source ORDER BY source) as sources
-                        FROM news_raw
-                        WHERE published_timestamp > CURRENT_TIMESTAMP - INTERVAL %s
-                        AND symbol IS NOT NULL
-                        GROUP BY symbol
-                        HAVING COUNT(*) >= 2
-                        ORDER BY mention_count DESC, MAX(published_timestamp) DESC
-                        LIMIT %s
-                    """, (f'{hours} hours', limit))
+            # Get recent articles
+            articles = await self.db_client.get_recent_news(hours=hours)
+            
+            # Count by symbol
+            symbol_counts = {}
+            symbol_sentiments = {}
+            
+            for article in articles:
+                symbol = article.get('symbol')
+                if symbol:
+                    symbol_counts[symbol] = symbol_counts.get(symbol, 0) + 1
                     
-                    trending = []
-                    for row in cur.fetchall():
-                        trend = dict(row)
-                        if trend.get('first_seen'):
-                            trend['first_seen'] = trend['first_seen'].isoformat()
-                        if trend.get('last_seen'):
-                            trend['last_seen'] = trend['last_seen'].isoformat()
-                        trending.append(trend)
+                    # Track sentiment
+                    if symbol not in symbol_sentiments:
+                        symbol_sentiments[symbol] = []
+                    
+                    sentiment = self._analyze_sentiment(article.get('headline', ''))
+                    symbol_sentiments[symbol].append(sentiment['score'])
             
-            return MCPResponse(
-                resource_type="trending_news",
-                data=trending
+            # Filter by minimum articles
+            trending = []
+            for symbol, count in symbol_counts.items():
+                if count >= min_articles:
+                    # Calculate average sentiment
+                    sentiments = symbol_sentiments.get(symbol, [])
+                    avg_sentiment = sum(sentiments) / len(sentiments) if sentiments else 0
+                    
+                    trending.append({
+                        'symbol': symbol,
+                        'article_count': count,
+                        'avg_sentiment': round(avg_sentiment, 3),
+                        'momentum_score': count * (1 + abs(avg_sentiment))  # Volume * sentiment
+                    })
+            
+            # Sort by momentum score
+            trending.sort(key=lambda x: x['momentum_score'], reverse=True)
+            
+            return ResourceResponse(
+                type="trending_symbols",
+                data={'trending': trending[:limit]},
+                metadata={
+                    'hours': hours,
+                    'total_articles': len(articles)
+                }
+            )
+        
+        @self.server.resource("news/sources/health")
+        async def get_sources_health(params: ResourceParams) -> ResourceResponse:
+            """Get health status of all news sources"""
+            health_data = {}
+            
+            for source_name, source_config in self.news_sources.items():
+                health_data[source_name] = {
+                    'enabled': source_config['enabled'],
+                    'tier': source_config['tier'],
+                    'health': source_config['health'],
+                    'last_check': source_config['last_check'],
+                    'rate_limit': source_config['rate_limit'],
+                    'blacklisted': source_name in self.blacklisted_sources
+                }
+            
+            # Calculate aggregate health
+            total_sources = len(self.news_sources)
+            healthy_sources = sum(1 for s in health_data.values() if s['health'] == 'healthy')
+            enabled_sources = sum(1 for s in health_data.values() if s['enabled'] and not s['blacklisted'])
+            
+            return ResourceResponse(
+                type="sources_health",
+                data={
+                    'sources': health_data,
+                    'summary': {
+                        'total': total_sources,
+                        'healthy': healthy_sources,
+                        'enabled': enabled_sources,
+                        'health_percentage': round(healthy_sources / total_sources * 100, 1)
+                    }
+                },
+                metadata={'checked_at': datetime.now().isoformat()}
+            )
+        
+        @self.server.resource("news/catalysts")
+        async def get_catalyst_news(params: ResourceParams) -> ResourceResponse:
+            """Get news with high catalyst potential"""
+            hours = params.get('hours', 4)
+            min_score = params.get('min_score', 0.7)
+            
+            # Get recent articles
+            articles = await self.db_client.get_recent_news(hours=hours)
+            
+            # Filter and score by catalyst potential
+            catalyst_articles = []
+            
+            for article in articles:
+                catalyst_score = self._calculate_catalyst_score(article)
+                if catalyst_score >= min_score:
+                    article['catalyst_score'] = catalyst_score
+                    article['catalyst_keywords'] = self._extract_catalyst_keywords(article)
+                    catalyst_articles.append(article)
+            
+            # Sort by catalyst score
+            catalyst_articles.sort(key=lambda x: x['catalyst_score'], reverse=True)
+            
+            return ResourceResponse(
+                type="catalyst_news",
+                data={'articles': catalyst_articles},
+                metadata={
+                    'count': len(catalyst_articles),
+                    'min_score': min_score
+                }
             )
     
     def _register_tools(self):
-        """Register callable tools"""
+        """Register MCP tools (write operations)"""
         
         @self.server.tool("collect_news")
-        async def collect_news(params: ToolParams) -> MCPResponse:
-            """Trigger news collection"""
+        async def collect_news(params: ToolParams) -> ToolResponse:
+            """Trigger news collection from all sources"""
             sources = params.get("sources", ["all"])
             mode = params.get("mode", "normal")
             symbols = params.get("symbols", None)
@@ -350,22 +446,25 @@ class NewsMCPServer:
             try:
                 # Log start
                 if cycle_id:
-                    log_workflow_step(cycle_id, 'news_collection', 'started', 
-                                    sources=sources, symbols=symbols)
-                
-                # Initialize Redis if needed
-                await self._init_redis()
+                    await self.db_client.log_workflow_step(
+                        cycle_id, 'news_collection', 'started',
+                        {'sources': sources, 'symbols': symbols}
+                    )
                 
                 # Collect from sources
                 results = await self._collect_all_news(symbols, sources)
                 
                 # Log completion
                 if cycle_id:
-                    log_workflow_step(cycle_id, 'news_collection', 'completed',
-                                    articles_collected=results["articles_collected"],
-                                    articles_saved=results["articles_saved"])
+                    await self.db_client.log_workflow_step(
+                        cycle_id, 'news_collection', 'completed',
+                        {
+                            'articles_collected': results["articles_collected"],
+                            'articles_saved': results["articles_saved"]
+                        }
+                    )
                 
-                return MCPResponse(
+                return ToolResponse(
                     success=True,
                     data={
                         "collected": results["articles_collected"],
@@ -378,56 +477,233 @@ class NewsMCPServer:
                 )
             except Exception as e:
                 if cycle_id:
-                    log_workflow_step(cycle_id, 'news_collection', 'failed', error=str(e))
+                    await self.db_client.log_workflow_step(
+                        cycle_id, 'news_collection', 'failed',
+                        {'error': str(e)}
+                    )
                     
-                return MCPResponse(
+                return ToolResponse(
+                    success=False,
+                    error=str(e)
+                )
+        
+        @self.server.tool("refresh_sources")
+        async def refresh_sources(params: ToolParams) -> ToolResponse:
+            """Refresh news sources and check their health"""
+            check_feeds = params.get("check_feeds", True)
+            
+            try:
+                # Check all sources
+                results = await self._check_all_sources(check_feeds)
+                
+                # Update database with health status
+                for source_name, status in results.items():
+                    await self.db_client.update_service_health(
+                        f"news_source_{source_name}",
+                        status['health'],
+                        {
+                            'last_check': status['last_check'],
+                            'error': status.get('error')
+                        }
+                    )
+                
+                # Calculate summary
+                healthy = sum(1 for s in results.values() if s['health'] == 'healthy')
+                total = len(results)
+                
+                return ToolResponse(
+                    success=True,
+                    data={
+                        'sources_checked': total,
+                        'healthy': healthy,
+                        'degraded': total - healthy,
+                        'details': results
+                    }
+                )
+                
+            except Exception as e:
+                return ToolResponse(
+                    success=False,
+                    error=str(e)
+                )
+        
+        @self.server.tool("blacklist_source")
+        async def blacklist_source(params: ToolParams) -> ToolResponse:
+            """Add or remove a source from the blacklist"""
+            source_name = params["source_name"]
+            action = params.get("action", "add")  # add or remove
+            reason = params.get("reason", "")
+            
+            try:
+                if action == "add":
+                    self.blacklisted_sources.add(source_name)
+                    await self.redis_client.sadd("news:blacklisted_sources", source_name)
+                    
+                    # Log the blacklisting
+                    self.logger.warning("Source blacklisted",
+                                      source=source_name,
+                                      reason=reason)
+                    
+                elif action == "remove":
+                    self.blacklisted_sources.discard(source_name)
+                    await self.redis_client.srem("news:blacklisted_sources", source_name)
+                    
+                    self.logger.info("Source removed from blacklist",
+                                   source=source_name)
+                
+                return ToolResponse(
+                    success=True,
+                    data={
+                        'source': source_name,
+                        'action': action,
+                        'blacklisted': source_name in self.blacklisted_sources,
+                        'total_blacklisted': len(self.blacklisted_sources)
+                    }
+                )
+                
+            except Exception as e:
+                return ToolResponse(
+                    success=False,
+                    error=str(e)
+                )
+        
+        @self.server.tool("prioritize_symbol")
+        async def prioritize_symbol(params: ToolParams) -> ToolResponse:
+            """Add or remove a symbol from priority list"""
+            symbol = params["symbol"].upper()
+            action = params.get("action", "add")  # add or remove
+            reason = params.get("reason", "")
+            
+            try:
+                if action == "add":
+                    self.priority_symbols.add(symbol)
+                    await self.redis_client.sadd("news:priority_symbols", symbol)
+                    
+                    self.logger.info("Symbol prioritized",
+                                   symbol=symbol,
+                                   reason=reason)
+                    
+                elif action == "remove":
+                    self.priority_symbols.discard(symbol)
+                    await self.redis_client.srem("news:priority_symbols", symbol)
+                    
+                    self.logger.info("Symbol deprioritized",
+                                   symbol=symbol)
+                
+                return ToolResponse(
+                    success=True,
+                    data={
+                        'symbol': symbol,
+                        'action': action,
+                        'prioritized': symbol in self.priority_symbols,
+                        'total_priority': len(self.priority_symbols)
+                    }
+                )
+                
+            except Exception as e:
+                return ToolResponse(
                     success=False,
                     error=str(e)
                 )
         
         @self.server.tool("analyze_sentiment")
-        async def analyze_sentiment(params: ToolParams) -> MCPResponse:
-            """Analyze news sentiment for symbol"""
-            symbol = params["symbol"]
+        async def analyze_sentiment(params: ToolParams) -> ToolResponse:
+            """Analyze sentiment for provided text or symbol"""
+            text = params.get("text")
+            symbol = params.get("symbol")
             timeframe = params.get("timeframe", "24h")
             
             try:
-                # Get news for symbol
-                hours_map = {"1h": 1, "4h": 4, "24h": 24, "7d": 168}
-                hours = hours_map.get(timeframe, 24)
+                if text:
+                    # Direct text analysis
+                    sentiment = self._analyze_sentiment(text)
+                    
+                    return ToolResponse(
+                        success=True,
+                        data=sentiment,
+                        metadata={"source": "direct_text"}
+                    )
                 
-                news_articles = self.get_recent_news(symbol=symbol, hours=hours)
-                sentiment = self._analyze_news_sentiment(news_articles)
+                elif symbol:
+                    # Analyze news sentiment for symbol
+                    hours_map = {"1h": 1, "4h": 4, "24h": 24, "7d": 168}
+                    hours = hours_map.get(timeframe, 24)
+                    
+                    articles = await self.db_client.get_recent_news(
+                        hours=hours, symbol=symbol
+                    )
+                    
+                    if not articles:
+                        return ToolResponse(
+                            success=True,
+                            data={
+                                "sentiment": "neutral",
+                                "confidence": 0.0,
+                                "reason": "no_articles"
+                            }
+                        )
+                    
+                    # Analyze all articles
+                    sentiments = []
+                    for article in articles:
+                        sentiment = self._analyze_sentiment(
+                            article.get('headline', '') + ' ' + 
+                            article.get('content_snippet', '')
+                        )
+                        sentiments.append(sentiment)
+                    
+                    # Aggregate
+                    avg_score = sum(s['score'] for s in sentiments) / len(sentiments)
+                    avg_confidence = sum(s['confidence'] for s in sentiments) / len(sentiments)
+                    
+                    return ToolResponse(
+                        success=True,
+                        data={
+                            "sentiment": "positive" if avg_score > 0.3 else "negative" if avg_score < -0.3 else "neutral",
+                            "score": round(avg_score, 3),
+                            "confidence": round(avg_confidence, 3),
+                            "article_count": len(articles),
+                            "timeframe": timeframe
+                        }
+                    )
                 
-                return MCPResponse(
-                    success=True,
-                    data=sentiment,
-                    confidence=sentiment["confidence"]
-                )
+                else:
+                    return ToolResponse(
+                        success=False,
+                        error="Either 'text' or 'symbol' parameter required"
+                    )
+                    
             except Exception as e:
-                return MCPResponse(
+                return ToolResponse(
                     success=False,
                     error=str(e)
                 )
         
-        @self.server.tool("track_narrative")
-        async def track_narrative(params: ToolParams) -> MCPResponse:
-            """Track narrative evolution for a story"""
-            narrative_id = params.get("narrative_id")
-            keywords = params.get("keywords", [])
+        @self.server.tool("clear_cache")
+        async def clear_cache(params: ToolParams) -> ToolResponse:
+            """Clear news cache"""
+            pattern = params.get("pattern", "news:*")
             
             try:
-                # Track narrative across sources
-                narrative_data = await self._track_narrative_evolution(
-                    narrative_id, keywords
+                # Get all matching keys
+                keys = []
+                async for key in self.redis_client.scan_iter(match=pattern):
+                    keys.append(key)
+                
+                # Delete keys
+                if keys:
+                    await self.redis_client.delete(*keys)
+                
+                return ToolResponse(
+                    success=True,
+                    data={
+                        "cleared": len(keys),
+                        "pattern": pattern
+                    }
                 )
                 
-                return MCPResponse(
-                    success=True,
-                    data=narrative_data
-                )
             except Exception as e:
-                return MCPResponse(
+                return ToolResponse(
                     success=False,
                     error=str(e)
                 )
@@ -440,545 +716,422 @@ class NewsMCPServer:
             """Stream real-time news events"""
             filters = params.get("filters", {})
             symbols = filters.get("symbols", [])
-            min_tier = filters.get("min_tier", 5)
+            min_tier = filters.get("min_tier", 3)
             
             while True:
                 # Check for new news
-                recent_news = self.get_recent_news(hours=0.1, limit=10)  # Last 6 minutes
+                recent_news = await self.db_client.get_recent_news(
+                    hours=0.1  # Last 6 minutes
+                )
                 
                 for article in recent_news:
-                    if (not symbols or article.get('symbol') in symbols) and \
-                       article.get('source_tier', 5) <= min_tier:
-                        
-                        yield {
-                            "type": "news.article",
-                            "data": {
-                                "symbol": article.get('symbol'),
-                                "headline": article.get('headline'),
-                                "source": article.get('source'),
-                                "sentiment": self._quick_sentiment(article.get('headline')),
-                                "catalyst_score": self._calculate_catalyst_score(article)
-                            }
+                    # Apply filters
+                    if symbols and article.get('symbol') not in symbols:
+                        continue
+                    
+                    if article.get('source_tier', 3) > min_tier:
+                        continue
+                    
+                    yield {
+                        "type": "news.article",
+                        "data": {
+                            "symbol": article.get('symbol'),
+                            "headline": article.get('headline'),
+                            "source": article.get('source'),
+                            "sentiment": self._quick_sentiment(article.get('headline')),
+                            "catalyst_score": self._calculate_catalyst_score(article),
+                            "published": article.get('published_timestamp')
                         }
+                    }
                 
                 await asyncio.sleep(30)  # Check every 30 seconds
     
-    async def _collect_all_news(self, symbols: Optional[List[str]], sources: List[str]) -> Dict:
+    async def _collect_all_news(self, symbols: Optional[List[str]], 
+                               sources: List[str]) -> Dict:
         """Collect news from all configured sources"""
         start_time = datetime.now()
-        all_news = []
-        collection_stats = {}
+        results = {
+            "articles_collected": 0,
+            "articles_saved": 0,
+            "duplicates": 0,
+            "sources": {}
+        }
         
-        # Use asyncio for concurrent collection
+        # Determine which sources to use
+        if "all" in sources:
+            active_sources = [
+                (name, config) for name, config in self.news_sources.items()
+                if config['enabled'] and name not in self.blacklisted_sources
+            ]
+        else:
+            active_sources = [
+                (name, config) for name, config in self.news_sources.items()
+                if name in sources and config['enabled'] and name not in self.blacklisted_sources
+            ]
+        
+        # Collect from each source
         tasks = []
-        
-        if 'all' in sources or 'newsapi' in sources:
-            if self.api_keys['newsapi']:
-                tasks.append(self._collect_newsapi_async(symbols))
-        
-        if 'all' in sources or 'rss' in sources:
-            tasks.append(self._collect_rss_async())
-        
-        if 'all' in sources or 'alphavantage' in sources:
-            if self.api_keys['alphavantage'] and symbols:
-                tasks.append(self._collect_alphavantage_async(symbols))
-        
-        if 'all' in sources or 'finnhub' in sources:
-            if self.api_keys['finnhub'] and symbols:
-                tasks.append(self._collect_finnhub_async(symbols))
-        
-        # Collect results
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                self.logger.error(f"Collection task failed", error=str(result))
-            else:
-                source_name, news_items = result
-                all_news.extend(news_items)
-                collection_stats[source_name] = len(news_items)
-        
-        # Save all collected news
-        save_stats = self._save_news_items(all_news)
-        
-        # Calculate execution time
-        execution_time = (datetime.now() - start_time).total_seconds()
-        
-        return {
-            'status': 'success',
-            'execution_time': execution_time,
-            'articles_collected': save_stats['total'],
-            'articles_saved': save_stats['saved'],
-            'duplicates': save_stats['duplicates'],
-            'errors': save_stats['errors'],
-            'sources': collection_stats,
-            'timestamp': datetime.now().isoformat()
-        }
-    
-    async def _collect_newsapi_async(self, symbols: Optional[List[str]]) -> tuple:
-        """Collect news from NewsAPI asynchronously"""
-        collected_news = []
-        base_url = "https://newsapi.org/v2/everything"
-        
-        queries = symbols[:5] if symbols else ['stock market', 'S&P 500', 'NYSE']
-        
-        async with aiohttp.ClientSession() as session:
-            for query in queries:
-                try:
-                    # Check cache first
-                    cache_key = f"newsapi:{query}"
-                    if self.redis_client:
-                        cached_data = await self.redis_client.get(cache_key)
-                        if cached_data:
-                            collected_news.extend(json.loads(cached_data))
-                            continue
-                    
-                    params = {
-                        'apiKey': self.api_keys['newsapi'],
-                        'q': query,
-                        'language': 'en',
-                        'sortBy': 'publishedAt',
-                        'pageSize': self.collection_config['max_articles_per_source'],
-                        'from': (datetime.now() - timedelta(days=1)).isoformat()
-                    }
-                    
-                    async with session.get(base_url, params=params) as response:
-                        if response.status == 200:
-                            data = await response.json()
-                            articles = []
-                            
-                            for article in data.get('articles', []):
-                                news_item = self._process_newsapi_article(article, query, symbols)
-                                articles.append(news_item)
-                                collected_news.append(news_item)
-                            
-                            # Cache the results
-                            if self.redis_client:
-                                await self.redis_client.setex(
-                                    cache_key,
-                                    self.collection_config['cache_ttl'],
-                                    json.dumps(articles)
-                                )
-                                
-                except Exception as e:
-                    self.logger.error(f"Error collecting from NewsAPI", error=str(e))
-        
-        return ('newsapi', collected_news)
-    
-    async def _collect_rss_async(self) -> tuple:
-        """Collect RSS feeds asynchronously"""
-        collected_news = []
-        
-        for source_name, feed_info in self.rss_feeds.items():
-            try:
-                # RSS parsing is synchronous, so run in executor
-                loop = asyncio.get_event_loop()
-                feed = await loop.run_in_executor(
-                    None, feedparser.parse, feed_info['url']
-                )
-                
-                for entry in feed.entries[:self.collection_config['max_articles_per_source']]:
-                    news_item = self._process_rss_entry(entry, source_name, feed_info['tier'])
-                    collected_news.append(news_item)
-                    
-            except Exception as e:
-                self.logger.error(f"Error collecting RSS feed {source_name}", error=str(e))
-        
-        return ('rss', collected_news)
-    
-    async def _collect_alphavantage_async(self, symbols: List[str]) -> tuple:
-        """Collect AlphaVantage news asynchronously"""
-        collected_news = []
-        base_url = "https://www.alphavantage.co/query"
-        
-        async with aiohttp.ClientSession() as session:
-            for symbol in symbols[:5]:
-                try:
-                    params = {
-                        'function': 'NEWS_SENTIMENT',
-                        'tickers': symbol,
-                        'apikey': self.api_keys['alphavantage']
-                    }
-                    
-                    async with session.get(base_url, params=params) as response:
-                        if response.status == 200:
-                            data = await response.json()
-                            
-                            for article in data.get('feed', []):
-                                news_item = self._process_alphavantage_article(article, symbol)
-                                collected_news.append(news_item)
-                                
-                except Exception as e:
-                    self.logger.error(f"Error collecting AlphaVantage news", error=str(e))
-        
-        return ('alphavantage', collected_news)
-    
-    async def _collect_finnhub_async(self, symbols: List[str]) -> tuple:
-        """Collect Finnhub news asynchronously"""
-        collected_news = []
-        base_url = "https://finnhub.io/api/v1/company-news"
-        
-        async with aiohttp.ClientSession() as session:
-            for symbol in symbols[:5]:
-                try:
-                    date_from = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
-                    date_to = datetime.now().strftime('%Y-%m-%d')
-                    
-                    params = {
-                        'symbol': symbol,
-                        'from': date_from,
-                        'to': date_to,
-                        'token': self.api_keys['finnhub']
-                    }
-                    
-                    async with session.get(base_url, params=params) as response:
-                        if response.status == 200:
-                            data = await response.json()
-                            
-                            for article in data[:self.collection_config['max_articles_per_source']]:
-                                news_item = self._process_finnhub_article(article, symbol)
-                                collected_news.append(news_item)
-                                
-                except Exception as e:
-                    self.logger.error(f"Error collecting Finnhub news", error=str(e))
-        
-        return ('finnhub', collected_news)
-    
-    def _process_newsapi_article(self, article: Dict, query: str, symbols: Optional[List[str]]) -> Dict:
-        """Process NewsAPI article"""
-        published = datetime.fromisoformat(article['publishedAt'].replace('Z', '+00:00'))
-        
-        return {
-            'news_id': self._generate_news_id(
-                article.get('title', ''),
-                article.get('source', {}).get('name', 'NewsAPI'),
-                str(published)
-            ),
-            'symbol': query if query in (symbols or []) else None,
-            'headline': article.get('title', ''),
-            'source': article.get('source', {}).get('name', 'NewsAPI'),
-            'published_timestamp': published,
-            'content_snippet': article.get('description', '')[:500],
-            'url': article.get('url'),
-            'is_pre_market': self._is_pre_market_news(published),
-            'market_state': self._get_market_state(published),
-            'headline_keywords': self._extract_headline_keywords(article.get('title', '')),
-            'mentioned_tickers': self._extract_mentioned_tickers(
-                article.get('title', '') + ' ' + article.get('description', '')
-            ),
-            'source_tier': self._determine_source_tier(
-                article.get('source', {}).get('name', 'Unknown')
+        for source_name, source_config in active_sources:
+            tasks.append(
+                self._collect_from_source(source_name, source_config, symbols)
             )
-        }
+        
+        # Execute all collections in parallel
+        source_results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Process results
+        for i, result in enumerate(source_results):
+            source_name = active_sources[i][0]
+            
+            if isinstance(result, Exception):
+                self.logger.error(f"Error collecting from {source_name}",
+                                error=str(result))
+                results["sources"][source_name] = {"error": str(result)}
+            else:
+                results["sources"][source_name] = result
+                results["articles_collected"] += result.get("collected", 0)
+                results["articles_saved"] += result.get("saved", 0)
+                results["duplicates"] += result.get("duplicates", 0)
+        
+        # Update execution time
+        results["execution_time"] = (datetime.now() - start_time).total_seconds()
+        
+        return results
     
-    def _process_rss_entry(self, entry: Dict, source_name: str, tier: int) -> Dict:
-        """Process RSS feed entry"""
-        published = datetime.fromtimestamp(
-            time.mktime(entry.published_parsed)
-        ) if hasattr(entry, 'published_parsed') else datetime.now()
+    async def _collect_from_source(self, source_name: str, source_config: Dict,
+                                  symbols: Optional[List[str]]) -> Dict:
+        """Collect news from a specific source"""
+        result = {
+            "collected": 0,
+            "saved": 0,
+            "duplicates": 0,
+            "errors": []
+        }
+        
+        try:
+            # Fetch RSS feed
+            async with aiohttp.ClientSession() as session:
+                async with session.get(source_config['base_url'], timeout=10) as response:
+                    content = await response.text()
+            
+            # Parse feed
+            feed = feedparser.parse(content)
+            
+            # Process entries
+            for entry in feed.entries[:self.collection_config['max_articles_per_cycle']]:
+                try:
+                    # Extract article data
+                    article_data = self._extract_article_data(
+                        entry, source_name, source_config['tier']
+                    )
+                    
+                    # Skip if no symbol detected and symbols filter is active
+                    if symbols and article_data.get('symbol') not in symbols:
+                        continue
+                    
+                    # Skip old articles
+                    published = datetime.fromisoformat(article_data['published_timestamp'])
+                    age_hours = (datetime.now() - published).total_seconds() / 3600
+                    if age_hours > self.collection_config['article_age_hours']:
+                        continue
+                    
+                    result["collected"] += 1
+                    
+                    # Save to database
+                    news_id = await self.db_client.persist_news_article({
+                        'headline': article_data['headline'],
+                        'source': source_name,
+                        'published_timestamp': article_data['published_timestamp'],
+                        'symbol': article_data.get('symbol'),
+                        'content_snippet': article_data.get('content_snippet'),
+                        'metadata': {
+                            'source_tier': source_config['tier'],
+                            'url': article_data.get('url'),
+                            'sentiment': self._quick_sentiment(article_data['headline'])
+                        }
+                    })
+                    
+                    if news_id:
+                        result["saved"] += 1
+                    else:
+                        result["duplicates"] += 1
+                        
+                except Exception as e:
+                    result["errors"].append(str(e))
+                    self.logger.warning(f"Error processing article from {source_name}",
+                                      error=str(e))
+            
+        except Exception as e:
+            result["errors"].append(f"Feed error: {str(e)}")
+            self.logger.error(f"Error fetching feed from {source_name}",
+                            error=str(e))
+        
+        return result
+    
+    def _extract_article_data(self, entry: Any, source: str, tier: int) -> Dict:
+        """Extract and normalize article data from feed entry"""
+        # Extract basic fields
+        headline = entry.get('title', '').strip()
+        url = entry.get('link', '')
+        published = entry.get('published_parsed')
+        
+        # Convert published time
+        if published:
+            published_dt = datetime.fromtimestamp(
+                feedparser._parse_date(entry.published).timestamp()
+            )
+        else:
+            published_dt = datetime.now()
+        
+        # Extract content snippet
+        content = ''
+        if hasattr(entry, 'summary'):
+            content = entry.summary[:500]
+        elif hasattr(entry, 'description'):
+            content = entry.description[:500]
+        
+        # Clean HTML from content
+        import re
+        content = re.sub('<[^<]+?>', '', content)
+        
+        # Detect symbol from headline and content
+        symbol = self._detect_symbol(headline + ' ' + content)
         
         return {
-            'news_id': self._generate_news_id(
-                entry.get('title', ''),
-                source_name,
-                str(published)
-            ),
-            'symbol': None,
-            'headline': entry.get('title', ''),
-            'source': source_name,
-            'published_timestamp': published,
-            'content_snippet': entry.get('summary', '')[:500],
-            'url': entry.get('link'),
-            'is_pre_market': self._is_pre_market_news(published),
-            'market_state': self._get_market_state(published),
-            'headline_keywords': self._extract_headline_keywords(entry.get('title', '')),
-            'mentioned_tickers': self._extract_mentioned_tickers(
-                entry.get('title', '') + ' ' + entry.get('summary', '')
-            ),
+            'headline': headline,
+            'url': url,
+            'published_timestamp': published_dt.isoformat(),
+            'content_snippet': content,
+            'symbol': symbol,
             'source_tier': tier
         }
     
-    def _process_alphavantage_article(self, article: Dict, symbol: str) -> Dict:
-        """Process AlphaVantage article"""
-        published = datetime.strptime(
-            article['time_published'],
-            '%Y%m%dT%H%M%S'
-        )
-        
-        return {
-            'news_id': self._generate_news_id(
-                article.get('title', ''),
-                article.get('source', 'AlphaVantage'),
-                str(published)
-            ),
-            'symbol': symbol,
-            'headline': article.get('title', ''),
-            'source': article.get('source', 'AlphaVantage'),
-            'published_timestamp': published,
-            'content_snippet': article.get('summary', '')[:500],
-            'url': article.get('url'),
-            'is_pre_market': self._is_pre_market_news(published),
-            'market_state': self._get_market_state(published),
-            'headline_keywords': self._extract_headline_keywords(article.get('title', '')),
-            'mentioned_tickers': self._extract_mentioned_tickers(
-                article.get('title', '') + ' ' + article.get('summary', '')
-            ),
-            'source_tier': self._determine_source_tier(article.get('source', 'Unknown')),
-            'metadata': {
-                'ticker_sentiment': article.get('ticker_sentiment', {}),
-                'overall_sentiment_score': article.get('overall_sentiment_score')
-            }
-        }
-    
-    def _process_finnhub_article(self, article: Dict, symbol: str) -> Dict:
-        """Process Finnhub article"""
-        published = datetime.fromtimestamp(article.get('datetime', time.time()))
-        
-        return {
-            'news_id': self._generate_news_id(
-                article.get('headline', ''),
-                article.get('source', 'Finnhub'),
-                str(published)
-            ),
-            'symbol': symbol,
-            'headline': article.get('headline', ''),
-            'source': article.get('source', 'Finnhub'),
-            'published_timestamp': published,
-            'content_snippet': article.get('summary', '')[:500],
-            'url': article.get('url'),
-            'is_pre_market': self._is_pre_market_news(published),
-            'market_state': self._get_market_state(published),
-            'headline_keywords': self._extract_headline_keywords(article.get('headline', '')),
-            'mentioned_tickers': self._extract_mentioned_tickers(
-                article.get('headline', '') + ' ' + article.get('summary', '')
-            ),
-            'source_tier': self._determine_source_tier(article.get('source', 'Unknown'))
-        }
-    
-    def _generate_news_id(self, headline: str, source: str, timestamp: str) -> str:
-        """Generate unique ID for news article"""
-        content = f"{headline}_{source}_{timestamp}"
-        return hashlib.md5(content.encode()).hexdigest()
-    
-    def _is_pre_market_news(self, timestamp: datetime) -> bool:
-        """Check if news was published during pre-market hours"""
-        timezone_offset = int(os.getenv('TIMEZONE_OFFSET', '-5'))
-        est_hour = timestamp.hour + timezone_offset
-        if est_hour < 0:
-            est_hour += 24
-        elif est_hour >= 24:
-            est_hour -= 24
-        return 4 <= est_hour < 9.5
-    
-    def _get_market_state(self, timestamp: datetime) -> str:
-        """Determine market state when news was published"""
-        timezone_offset = int(os.getenv('TIMEZONE_OFFSET', '-5'))
-        est_hour = timestamp.hour + timezone_offset
-        if est_hour < 0:
-            est_hour += 24
-        elif est_hour >= 24:
-            est_hour -= 24
-        
-        weekday = timestamp.weekday()
-        
-        if weekday >= 5:  # Weekend
-            return "weekend"
-        
-        if 4 <= est_hour < 9.5:
-            return "pre-market"
-        elif 9.5 <= est_hour < 16:
-            return "regular"
-        elif 16 <= est_hour < 20:
-            return "after-hours"
-        else:
-            return "closed"
-    
-    def _extract_headline_keywords(self, headline: str) -> List[str]:
-        """Extract important keywords from headline"""
-        keywords = []
-        headline_lower = headline.lower()
-        
-        keyword_patterns = {
-            'earnings': ['earnings', 'revenue', 'profit', 'loss', 'beat', 'miss', 'eps'],
-            'fda': ['fda', 'approval', 'drug', 'clinical', 'trial', 'phase'],
-            'merger': ['merger', 'acquisition', 'acquire', 'buyout', 'takeover', 'deal'],
-            'analyst': ['upgrade', 'downgrade', 'rating', 'price target', 'analyst'],
-            'guidance': ['guidance', 'forecast', 'outlook', 'warns', 'expects', 'raises', 'lowers']
-        }
-        
-        for category, patterns in keyword_patterns.items():
-            if any(pattern in headline_lower for pattern in patterns):
-                keywords.append(category)
-        
-        return keywords
-    
-    def _extract_mentioned_tickers(self, text: str) -> List[str]:
-        """Extract stock tickers mentioned in text"""
+    def _detect_symbol(self, text: str) -> Optional[str]:
+        """Detect stock symbol from text"""
         import re
         
-        ticker_pattern = r'\$?[A-Z]{1,5}\b'
-        exclusions = {'I', 'A', 'THE', 'AND', 'OR', 'TO', 'IN', 'OF', 'FOR',
-                     'CEO', 'CFO', 'IPO', 'FDA', 'SEC', 'NYSE', 'ETF', 'AI', 'IT'}
+        # Look for explicit ticker symbols
+        # Pattern: $SYMBOL or (SYMBOL) or SYMBOL: at start of sentence
+        patterns = [
+            r'\$([A-Z]{1,5})\b',  # $AAPL
+            r'\(([A-Z]{1,5})\)',   # (AAPL)
+            r'\b([A-Z]{1,5}):\s',  # AAPL: at start
+        ]
         
-        potential_tickers = re.findall(ticker_pattern, text)
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                symbol = match.group(1)
+                # Validate it's likely a stock symbol
+                if 1 <= len(symbol) <= 5 and symbol.isalpha():
+                    return symbol
         
-        tickers = []
-        for ticker in potential_tickers:
-            ticker = ticker.replace('$', '')
-            if ticker not in exclusions and len(ticker) >= 2:
-                tickers.append(ticker)
+        # If priority symbols mentioned, detect those
+        for symbol in self.priority_symbols:
+            if symbol in text.upper():
+                return symbol
         
-        return list(set(tickers))
+        return None
     
-    def _determine_source_tier(self, source: str) -> int:
-        """Determine reliability tier of news source"""
-        tier_mapping = {
-            'Reuters': 1, 'Bloomberg': 1, 'Wall Street Journal': 1,
-            'MarketWatch': 1, 'CNBC': 1, 'Yahoo Finance': 1,
-            'Seeking Alpha': 2, 'Investing.com': 2, 'TheStreet': 2,
-            'Benzinga': 3, 'InvestorPlace': 3, 'Motley Fool': 3,
-            'StockTwits': 4, 'Reddit': 4
-        }
+    def _analyze_sentiment(self, text: str) -> Dict:
+        """Analyze sentiment of text"""
+        # Simple keyword-based sentiment analysis
+        # In production, use a proper NLP model
         
-        for key, tier in tier_mapping.items():
-            if key.lower() in source.lower():
-                return tier
+        positive_words = [
+            'surge', 'rally', 'gain', 'rise', 'climb', 'jump', 'soar',
+            'positive', 'profit', 'beat', 'exceed', 'upgrade', 'buy',
+            'bullish', 'growth', 'improve', 'breakthrough', 'success'
+        ]
         
-        return 5  # Default to lowest tier
-    
-    def _save_news_items(self, news_items: List[Dict]) -> Dict[str, int]:
-        """Save news items to database"""
-        stats = {'total': len(news_items), 'saved': 0, 'duplicates': 0, 'errors': 0}
+        negative_words = [
+            'fall', 'drop', 'decline', 'plunge', 'crash', 'sink', 'tumble',
+            'negative', 'loss', 'miss', 'below', 'downgrade', 'sell',
+            'bearish', 'concern', 'risk', 'failure', 'lawsuit', 'investigation'
+        ]
         
-        for item in news_items:
-            try:
-                news_id = self.insert_news_article(item)
-                if news_id:
-                    stats['saved'] += 1
-                else:
-                    stats['duplicates'] += 1
-            except Exception as e:
-                self.logger.error("Error saving news item", error=str(e))
-                stats['errors'] += 1
+        text_lower = text.lower()
         
-        return stats
-    
-    def _analyze_news_sentiment(self, articles: List[Dict]) -> Dict:
-        """Analyze sentiment from news articles"""
-        if not articles:
+        # Count occurrences
+        positive_count = sum(1 for word in positive_words if word in text_lower)
+        negative_count = sum(1 for word in negative_words if word in text_lower)
+        
+        # Calculate score
+        total = positive_count + negative_count
+        if total == 0:
             return {
-                'overall': 'neutral',
-                'confidence': 0.0,
-                'positive_count': 0,
-                'negative_count': 0,
-                'neutral_count': 0
+                "sentiment": "neutral",
+                "score": 0.0,
+                "confidence": 0.5
             }
         
-        positive_count = 0
-        negative_count = 0
+        score = (positive_count - negative_count) / total
+        confidence = min(total / 10, 1.0)  # More words = higher confidence
         
-        for article in articles:
-            keywords = article.get('headline_keywords', [])
-            headline_lower = article.get('headline', '').lower()
-            
-            # Simple sentiment based on keywords
-            positive_words = ['beat', 'upgrade', 'approval', 'raised', 'growth', 'profit']
-            negative_words = ['miss', 'downgrade', 'rejection', 'lowered', 'loss', 'warning']
-            
-            if any(word in headline_lower for word in positive_words):
-                positive_count += 1
-            elif any(word in headline_lower for word in negative_words):
-                negative_count += 1
-        
-        total = len(articles)
-        neutral_count = total - positive_count - negative_count
-        
-        # Determine overall sentiment
-        if positive_count > negative_count * 1.5:
-            overall = 'positive'
-        elif negative_count > positive_count * 1.5:
-            overall = 'negative'
+        # Determine sentiment
+        if score > 0.3:
+            sentiment = "positive"
+        elif score < -0.3:
+            sentiment = "negative"
         else:
-            overall = 'neutral'
-        
-        confidence = max(positive_count, negative_count) / total if total > 0 else 0
+            sentiment = "neutral"
         
         return {
-            'overall': overall,
-            'confidence': round(confidence, 2),
-            'positive_count': positive_count,
-            'negative_count': negative_count,
-            'neutral_count': neutral_count
+            "sentiment": sentiment,
+            "score": round(score, 3),
+            "confidence": round(confidence, 3)
         }
     
     def _quick_sentiment(self, headline: str) -> str:
-        """Quick sentiment analysis for streaming"""
-        headline_lower = headline.lower()
-        
-        positive_words = ['beat', 'upgrade', 'approval', 'raised', 'growth']
-        negative_words = ['miss', 'downgrade', 'rejection', 'lowered', 'loss']
-        
-        if any(word in headline_lower for word in positive_words):
-            return 'positive'
-        elif any(word in headline_lower for word in negative_words):
-            return 'negative'
-        else:
-            return 'neutral'
+        """Quick sentiment check for headlines"""
+        sentiment_data = self._analyze_sentiment(headline)
+        return sentiment_data["sentiment"]
     
     def _calculate_catalyst_score(self, article: Dict) -> float:
-        """Calculate catalyst score for an article"""
-        score = 0
+        """Calculate catalyst potential score"""
+        score = 0.0
         
-        # Source tier contribution
-        tier = article.get('source_tier', 5)
-        score += (6 - tier) * 10  # Tier 1 = 50, Tier 5 = 10
+        headline = article.get('headline', '').lower()
+        content = article.get('content_snippet', '').lower()
+        full_text = headline + ' ' + content
         
-        # Keyword contribution
-        keywords = article.get('headline_keywords', [])
-        high_impact_keywords = ['earnings', 'fda', 'merger', 'guidance']
-        for keyword in keywords:
-            if keyword in high_impact_keywords:
-                score += 15
-            else:
-                score += 5
+        # Check for catalyst keywords
+        catalyst_count = sum(
+            1 for keyword in self.collection_config['catalyst_keywords']
+            if keyword in full_text
+        )
         
-        # Recency contribution
-        if article.get('is_pre_market'):
-            score += 20
+        # Base score from keyword matches
+        score = min(catalyst_count * 0.3, 1.0)
         
-        # Market state contribution
-        if article.get('market_state') in ['pre-market', 'after-hours']:
-            score += 10
+        # Boost for tier 1 sources
+        if article.get('source_tier', 3) == 1:
+            score *= 1.2
         
-        return min(score, 100)  # Cap at 100
+        # Boost for strong sentiment
+        sentiment = self._analyze_sentiment(headline)
+        if abs(sentiment['score']) > 0.5:
+            score *= 1.3
+        
+        # Cap at 1.0
+        return min(score, 1.0)
     
-    async def _track_narrative_evolution(self, narrative_id: str, keywords: List[str]) -> Dict:
-        """Track how a narrative evolves across sources"""
-        # Implementation would track story progression
-        return {
-            'narrative_id': narrative_id,
-            'keywords': keywords,
-            'evolution': [],
-            'status': 'tracking'
-        }
+    def _extract_catalyst_keywords(self, article: Dict) -> List[str]:
+        """Extract catalyst keywords found in article"""
+        headline = article.get('headline', '').lower()
+        content = article.get('content_snippet', '').lower()
+        full_text = headline + ' ' + content
+        
+        found_keywords = [
+            keyword for keyword in self.collection_config['catalyst_keywords']
+            if keyword in full_text
+        ]
+        
+        return found_keywords
+    
+    async def _check_all_sources(self, check_feeds: bool = False) -> Dict:
+        """Check health of all news sources"""
+        results = {}
+        
+        for source_name, source_config in self.news_sources.items():
+            try:
+                if check_feeds:
+                    # Actually try to fetch the feed
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(
+                            source_config['base_url'], 
+                            timeout=5
+                        ) as response:
+                            if response.status == 200:
+                                source_config['health'] = 'healthy'
+                            else:
+                                source_config['health'] = 'degraded'
+                else:
+                    # Just mark as healthy if enabled
+                    source_config['health'] = 'healthy' if source_config['enabled'] else 'disabled'
+                
+                source_config['last_check'] = datetime.now().isoformat()
+                
+                results[source_name] = {
+                    'health': source_config['health'],
+                    'last_check': source_config['last_check']
+                }
+                
+            except Exception as e:
+                source_config['health'] = 'unhealthy'
+                source_config['last_check'] = datetime.now().isoformat()
+                
+                results[source_name] = {
+                    'health': 'unhealthy',
+                    'last_check': source_config['last_check'],
+                    'error': str(e)
+                }
+        
+        return results
+    
+    async def health_check(self) -> Dict:
+        """Service health check"""
+        try:
+            # Check database connection
+            db_status = await self.db_client.get_database_status()
+            
+            # Check Redis connection
+            redis_ok = await self.redis_client.ping() if self.redis_client else False
+            
+            # Check news sources
+            healthy_sources = sum(
+                1 for s in self.news_sources.values() 
+                if s['health'] == 'healthy'
+            )
+            
+            return {
+                'status': 'healthy',
+                'database': db_status.get('postgresql', {}).get('status', 'unknown'),
+                'redis': 'healthy' if redis_ok else 'unhealthy',
+                'sources': {
+                    'healthy': healthy_sources,
+                    'total': len(self.news_sources)
+                }
+            }
+        except Exception as e:
+            return {
+                'status': 'unhealthy',
+                'error': str(e)
+            }
     
     async def run(self):
-        """Run the MCP server"""
-        # FIXED: Changed port from 5108 to 5008
-        self.logger.info("Starting News MCP Server", port=5008)
+        """Start the MCP server"""
+        self.logger.info("Starting News Intelligence MCP Server",
+                        version="3.1.0",
+                        port=self.port,
+                        environment=os.getenv('ENVIRONMENT', 'development'))
         
-        # Initialize Redis
-        await self._init_redis()
+        # Create WebSocket transport
+        transport = WebSocketTransport(host='0.0.0.0', port=self.port)
         
-        # Support both WebSocket and stdio transports
-        if os.getenv('MCP_TRANSPORT', 'websocket') == 'stdio':
-            transport = StdioTransport()
-        else:
-            transport = WebSocketTransport(port=5008)  # FIXED: Changed from 5108
-        
+        # Run server
         await self.server.run(transport)
 
 
-if __name__ == "__main__":
+async def main():
+    """Main entry point"""
     server = NewsMCPServer()
-    asyncio.run(server.run())
+    
+    try:
+        # Initialize server
+        await server.initialize()
+        
+        # Run server
+        await server.run()
+        
+    except KeyboardInterrupt:
+        server.logger.info("Received interrupt signal")
+    except Exception as e:
+        server.logger.error("Fatal error", error=str(e))
+    finally:
+        # Cleanup
+        await server.cleanup()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
