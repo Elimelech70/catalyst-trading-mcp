@@ -26,9 +26,6 @@ Open Terminal on your laptop and run:
 # Generate a new SSH key pair (recommended: ed25519 algorithm)
 ssh-keygen -t ed25519 -C "catalyst-trading-mcp" -f ~/.ssh/catalyst_droplet
 
-# If ed25519 is not available, use RSA:
-# ssh-keygen -t rsa -b 4096 -C "catalyst-trading-mcp" -f ~/.ssh/catalyst_droplet
-```
 
 When prompted:
 - Press Enter to accept the default location (or specify custom path)
@@ -40,7 +37,6 @@ When prompted:
 # Display the public key to copy
 cat ~/.ssh/catalyst_droplet.pub
 ```
-
 Copy the entire output (starts with `ssh-ed25519` or `ssh-rsa`)
 
 ## Step 3: Add SSH Key to DigitalOcean
@@ -76,7 +72,7 @@ exit
 ssh -i ~/.ssh/catalyst_droplet root@YOUR_DROPLET_IP
 
 # Example:
-# ssh -i ~/.ssh/catalyst_droplet root@164.92.123.45
+# ssh -i ~/.ssh/catalyst_droplet root@68.183.177.11
 ```
 
 ## Step 5: Create SSH Config for Easy Access
@@ -188,7 +184,7 @@ ssh-keygen -t ed25519 -f ~/.ssh/catalyst_droplet
 cat ~/.ssh/catalyst_droplet.pub
 
 # Connect with key file
-ssh -i ~/.ssh/catalyst_droplet root@YOUR_DROPLET_IP
+ssh -i ~/.ssh/catalyst_droplet root@68.183.177.11
 
 # Connect with config alias
 ssh catalyst-trading

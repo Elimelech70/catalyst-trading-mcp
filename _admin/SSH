@@ -1,0 +1,9 @@
+#Basic commands
+#Uses the Catalyst_droplet SSH key for authentication
+#From Droplet to local vscode workspace
+scp -i ~/.ssh/catalyst_droplet root@68.183.177.11:/root/text.txt ./
+
+#i had to cd to the correct location 
+#cd catalyst-trading-mcp folder
+scp -i ~/.ssh/catalyst_droplet root@68.183.177.11:/root/catalyst-trading-mcp/services/orchestration/Dockerfile ./services/orchestration
+scp -i ~/.ssh/catalyst_droplet root@68.183.177.11:/root/catalyst-trading-mcp/services/pattern/Dockerfile ./services/pattern
