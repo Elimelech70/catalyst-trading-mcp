@@ -3,7 +3,7 @@
 # Last Updated: 2025-08-23
 
 # MCP Protocol
-mcp>=0.1.0
+mcp>=1.7.0
 
 # Database
 asyncpg>=0.29.0
