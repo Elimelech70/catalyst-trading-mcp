@@ -9,7 +9,7 @@
 # From GitHub to Docker
 #********************************
 
-
+git pull origin main
 
 
 
