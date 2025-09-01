@@ -1,0 +1,41 @@
+# Name of Application: Catalyst Trading System
+# Name of file: services/reporting/requirements.txt
+# Version: 4.1.0
+# Last Updated: 2025-09-01
+# Purpose: Python dependencies for Reporting Service v4.1
+
+# Core Framework
+fastapi==0.109.0
+uvicorn[standard]==0.25.0
+
+# Database
+asyncpg==0.29.0
+redis==5.0.1
+
+# Data Processing
+pandas==2.1.4
+numpy==1.26.2
+
+# Visualization
+matplotlib==3.7.4
+seaborn==0.12.2
+plotly==5.17.0
+
+# Report Generation
+jinja2==3.1.2
+weasyprint==60.2
+
+# Logging and Configuration
+structlog==24.1.0
+python-dotenv==1.0.0
+pydantic==2.5.3
+
+# Date/Time
+python-dateutil==2.8.2
+pytz==2024.1
+
+# JSON handling
+orjson==3.9.10
+
+# Monitoring
+prometheus-client==0.19.0

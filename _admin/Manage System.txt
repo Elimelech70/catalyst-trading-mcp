@@ -1,0 +1,11 @@
+
+
+
+# Stop everything first
+./scripts/catalyst-mcp.sh stop
+
+🏗️ Rebuild Everything:# Force rebuild all images
+docker-compose build --no-cache
+
+# This will take a few minutes but ensures clean containers🚀 Start Again:# Start services
+./scripts/catalyst-mcp.sh start

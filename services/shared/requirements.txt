@@ -1,0 +1,32 @@
+# Catalyst Trading MCP - Python Requirements
+# Updated: 2025-08-30
+
+# MCP SDK (correct version)
+mcp>=1.7.0
+
+# Database
+asyncpg>=0.29.0
+redis>=5.0.0
+
+# HTTP/WebSocket
+aiohttp>=3.9.0
+fastapi>=0.104.0
+uvicorn>=0.24.0
+
+# Data Processing
+pandas>=2.1.0
+numpy>=1.24.0
+
+# Logging and Configuration
+structlog>=24.1.0
+python-dotenv>=1.0.0
+
+# Date/Time
+python-dateutil>=2.8.2
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+
+# JSON handling
+orjson>=3.9.0

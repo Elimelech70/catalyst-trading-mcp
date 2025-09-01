@@ -1,0 +1,34 @@
+{
+  "mcpServers": {
+    "catalyst-orchestration": {
+      "command": "python",
+      "args": [
+        "./services/orchestration/orchestration-service.py"
+      ],
+      "env": {
+        "DATABASE_URL": "postgresql://catalyst:secure_password@localhost:5432/catalyst_trading",
+        "REDIS_URL": "redis://localhost:6379/0"
+      }
+    },
+    "catalyst-news": {
+      "command": "python",
+      "args": [
+        "./services/news-scanner/news-scanner-service.py"
+      ],
+      "env": {
+        "DATABASE_URL": "postgresql://catalyst:secure_password@localhost:5432/catalyst_trading",
+        "REDIS_URL": "redis://localhost:6379/0"
+      }
+    },
+    "catalyst-scanner": {
+      "command": "python",
+      "args": [
+        "./services/security-scanner/security-scanner-service.py"
+      ],
+      "env": {
+        "DATABASE_URL": "postgresql://catalyst:secure_password@localhost:5432/catalyst_trading",
+        "REDIS_URL": "redis://localhost:6379/0"
+      }
+    }
+  }
+}
