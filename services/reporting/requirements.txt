@@ -1,41 +1,41 @@
-# Name of Application: Catalyst Trading System
-# Name of file: services/reporting/requirements.txt
-# Version: 4.1.0
-# Last Updated: 2025-09-01
-# Purpose: Python dependencies for Reporting Service v4.1
+# Catalyst Trading MCP - Base Requirements
+# Core MCP and async framework
+fastmcp>=0.10.0
+asyncio-mqtt>=0.13.0
 
-# Core Framework
+# Web framework  
 fastapi==0.109.0
 uvicorn[standard]==0.25.0
+python-multipart==0.0.6
 
 # Database
 asyncpg==0.29.0
+psycopg2-binary==2.9.9
 redis==5.0.1
 
-# Data Processing
+# HTTP clients
+aiohttp==3.9.1
+httpx==0.26.0
+requests==2.31.0
+
+# Data processing
 pandas==2.1.4
 numpy==1.26.2
-
-# Visualization
-matplotlib==3.7.4
-seaborn==0.12.2
-plotly==5.17.0
-
-# Report Generation
-jinja2==3.1.2
-weasyprint==60.2
-
-# Logging and Configuration
-structlog==24.1.0
-python-dotenv==1.0.0
-pydantic==2.5.3
-
-# Date/Time
 python-dateutil==2.8.2
 pytz==2024.1
 
-# JSON handling
-orjson==3.9.10
+# Configuration and logging
+python-dotenv==1.0.0
+pydantic==2.5.3
+structlog==24.1.0
 
-# Monitoring
-prometheus-client==0.19.0
+# Utilities
+orjson==3.9.10
+schedule==1.2.0
+jinja2==3.1.2
+
+# Reporting and visualization
+matplotlib==3.8.2
+seaborn==0.13.0
+plotly==5.17.0
+reportlab==4.0.7

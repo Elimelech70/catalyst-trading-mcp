@@ -10,3 +10,60 @@ env.bak/
 #  you could uncomment the following to ignore the entire vscode folder
 # .vscode/
 
+
+# === CATALYST TRADING MCP SPECIFIC ===
+
+# Environment files
+.env
+.env.*
+config/.env*
+!config/.env.template
+
+# Runtime data
+logs/
+data/
+*.log
+
+# Docker volumes
+postgres_data/
+redis_data/
+volume_*/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Trading data
+trades/
+positions/
+orders/
+market_data/
+backtests/
+
+# API Keys and secrets (extra safety)
+secrets/
+keys/
+credentials/
+*.key
+*.pem
+*.p12
+*.pfx
+
