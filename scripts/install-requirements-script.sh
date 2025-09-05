@@ -304,20 +304,20 @@ fi
 
 echo ""
 echo -e "${CYAN}Quick verification commands:${NC}"
-echo "  python -c \"import mcp; print('MCP OK')\""
-echo "  python -c \"import fastmcp; print('FastMCP OK')\""
-echo "  python -c \"import talib; print('TA-Lib OK')\""
+echo "  $PYTHON_CMD -c \"import mcp; print('MCP OK')\""
+echo "  $PYTHON_CMD -c \"import fastmcp; print('FastMCP OK')\""
+echo "  $PYTHON_CMD -c \"import talib; print('TA-Lib OK')\""
 echo ""
 echo -e "${CYAN}Next steps:${NC}"
 echo "  1. Set up your .env file with API keys"
-echo "  2. Initialize the database: python scripts/init_database.py"
+echo "  2. Initialize the database: $PYTHON_CMD scripts/init_database.py"
 echo "  3. Start services: docker-compose up -d"
 echo "  4. Check health: curl http://localhost:5000/health"
 echo ""
 
 # Create a pip freeze file for reference
 echo -e "${CYAN}Creating pip freeze file for reference...${NC}"
-pip freeze > installed_packages.txt
+$PIP_CMD freeze > installed_packages.txt
 echo -e "  ${GREEN}✅ Package list saved to: installed_packages.txt${NC}"
 echo ""
 
