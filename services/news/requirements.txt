@@ -1,51 +1,97 @@
 # Name of Application: Catalyst Trading System
 # Name of file: services/news/requirements.txt
-# Version: 4.1.0
-# Last Updated: 2025-09-01
-# Purpose: Python dependencies for News Service v4.1
+# Version: 4.2.0
+# Last Updated: 2025-09-05
+# Purpose: News service dependencies with optimized installation
 
-# Core Framework
-fastapi>=0.115.12
+# REVISION HISTORY:
+# v4.2.0 (2025-09-05) - Optimized for Docker non-root user
+# - Separated heavy ML dependencies
+# - Core news functionality prioritized
+# - Optional advanced NLP at the end
+
+# ============================================
+# CORE DEPENDENCIES (Install First)
+# ============================================
+# These are inherited from base but listed for clarity
+fastapi==0.109.0
 uvicorn[standard]==0.25.0
-python-multipart==0.0.6
-
-# HTTP/WebSocket
 aiohttp==3.9.1
-httpx>=0.28.1
-requests==2.31.0
-
-# Database
+httpx==0.26.0
 asyncpg==0.29.0
-psycopg2-binary==2.9.9
 redis==5.0.1
-
-# News Processing
-feedparser==6.0.11
-newspaper3k==0.2.8
-beautifulsoup4==4.12.2
-lxml==4.9.3
-
-# Natural Language Processing
-nltk==3.8.1
-textblob==0.17.1
-vaderSentiment==3.3.2
-
-# Data Processing
 pandas==2.1.4
 numpy==1.26.2
-
-# Logging and Configuration
+python-dotenv==1.0.0
 structlog==24.1.0
-python-dotenv>=1.0.1
-pydantic==2.5.3
-pydantic-settings==2.1.0
 
-# Date/Time
-python-dateutil==2.8.2
-pytz==2024.1
+# ============================================
+# NEWS API CLIENTS
+# ============================================
+newsapi-python==0.2.7         # NewsAPI.org client
+feedparser==6.0.11            # RSS feed parsing
+finnhub-python==2.4.19        # Finnhub news API
+alpha-vantage==2.3.1          # Alpha Vantage news
 
-# JSON handling
-orjson==3.9.10
+# ============================================
+# WEB SCRAPING & EXTRACTION
+# ============================================
+beautifulsoup4==4.12.3        # HTML parsing
+lxml[html_clean]==5.1.0       # XML/HTML processing
+newspaper3k==0.2.8            # Article extraction
+goose3==3.1.17               # Alternative article extraction
+requests==2.31.0              # HTTP library
+selectolax==0.3.21           # Fast HTML parser
 
-# Monitoring
-prometheus-client==0.19.0
+# ============================================
+# BASIC TEXT PROCESSING
+# ============================================
+nltk==3.8.1                   # Natural Language Toolkit
+textblob==0.17.1             # Simple sentiment analysis
+vaderSentiment==3.3.2        # Social media sentiment
+langdetect==1.0.9            # Language detection
+python-dateutil==2.8.2       # Date parsing from text
+
+# ============================================
+# DATA PROCESSING
+# ============================================
+pytz==2024.1                 # Timezone handling
+schedule==1.2.0              # Task scheduling
+aiofiles==23.2.1            # Async file operations
+orjson==3.9.10              # Fast JSON processing
+
+# ============================================
+# CACHING & RATE LIMITING
+# ============================================
+asyncio-throttle==1.0.2     # Rate limiting
+cachetools==5.3.2           # Caching utilities
+tenacity==8.2.3             # Retry logic
+
+# ============================================
+# OPTIONAL: ADVANCED NLP (Comment out if slow)
+# ============================================
+# These are heavy dependencies - install separately if needed
+
+# spacy==3.7.4                # Advanced NLP (300MB+)
+# Run after install: python -m spacy download en_core_web_sm
+
+# transformers==4.36.0        # Hugging Face transformers (1GB+)
+# torch==2.1.0               # PyTorch for transformers (2GB+)
+# tensorflow==2.15.0         # Alternative to PyTorch (500MB+)
+
+# ============================================
+# OPTIONAL: SOCIAL MEDIA
+# ============================================
+# tweepy==4.14.0             # Twitter API (if needed)
+# praw==7.7.1                # Reddit API (if needed)
+
+# ============================================
+# NOTES FOR DOCKER INSTALLATION:
+# ============================================
+# 1. Install core dependencies first
+# 2. NLTK data must be downloaded separately:
+#    python -c "import nltk; nltk.download('vader_lexicon'); nltk.download('punkt')"
+# 3. For spacy models (if using spacy):
+#    python -m spacy download en_core_web_sm
+# 4. Heavy ML libraries (transformers, torch) should be installed
+#    only if you need advanced sentiment analysis
