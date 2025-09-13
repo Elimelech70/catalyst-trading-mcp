@@ -73,10 +73,8 @@ services:
   # Scanner Service (v41)
   scanner:
     build:
-    env_file:
-      - .env
-    context: ./services/scanner
-    dockerfile: Dockerfile
+      context: ./services/scanner
+      dockerfile: Dockerfile
     container_name: catalyst-scanner
     environment:
       DATABASE_URL: postgresql://catalyst:${DB_PASSWORD:-secure_password}@postgres:5432/catalyst_trading
