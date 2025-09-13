@@ -234,7 +234,7 @@ class ScannerMCPServer:
                 }
             )
         
-        @self.mcp.resource("scanner/history")
+        @self.mcp.resource("http://scanner/history")
         async def get_scan_history() -> Dict:
             """Get scanner execution history"""
             limit = params.get('limit', 20)
