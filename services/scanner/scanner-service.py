@@ -1039,7 +1039,7 @@ class ScannerMCPServer:
 
 async def main():
     """Main entry point"""
-    server = ScannerFastMCP()
+    server = ScannerMCPServer()
     
     try:
         # Initialize server

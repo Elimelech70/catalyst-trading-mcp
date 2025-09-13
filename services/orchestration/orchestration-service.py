@@ -178,7 +178,7 @@ async def get_current_cycle(ctx: Context) -> Dict:
         "pending_signals": len(state.pending_signals)
     }
 
-@mcp.resource("trading/positions/active")
+@mcp.resource("http://trading/positions/active")
 async def get_active_positions(ctx: Context) -> Dict:
     """Get all active trading positions"""
     return {
@@ -187,7 +187,7 @@ async def get_active_positions(ctx: Context) -> Dict:
         "timestamp": datetime.now().isoformat()
     }
 
-@mcp.resource("trading/signals/pending")
+@mcp.resource("http://trading/signals/pending")
 async def get_pending_signals(ctx: Context) -> Dict:
     """Get pending trading signals awaiting execution"""
     return {
