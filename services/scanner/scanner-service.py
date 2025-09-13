@@ -47,7 +47,7 @@ import yfinance as yf
 
 # MCP imports
 from mcp.server.fastmcp import FastMCP
-from mcp.server import WebSocketTransport, StdioTransport
+from mcp.server.stdio import stdio_server
 
 # Import MCP Database Client instead of database operations
 from mcp_database_client import MCPDatabaseClient

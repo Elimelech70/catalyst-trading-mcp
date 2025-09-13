@@ -96,7 +96,7 @@ state = SystemState()
 
 # === INITIALIZATION ===
 
-@mcp.init()
+#@mcp.init()
 async def initialize(ctx: Context):
     """Initialize orchestration service"""
     logger.info("Initializing Catalyst Trading Orchestration Service")

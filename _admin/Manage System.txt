@@ -12,6 +12,7 @@ docker-compose build --no-cache
 
 #----------------------------------------------
 # Script to get all logs
+# get-logs.sh
 #----------------------------------------------
 # Save each service log to its own file
 for service in orchestration risk-manager scanner pattern trading news reporting; do \
