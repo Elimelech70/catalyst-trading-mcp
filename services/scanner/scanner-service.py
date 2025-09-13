@@ -198,7 +198,7 @@ class ScannerMCPServer:
             for candidate in candidates:
                 candidate['blacklisted'] = candidate.get('symbol') in self.blacklisted_symbols
             
-            return ResourceResponse(
+            return(
                 type="candidate_list",
                 data={'candidates': candidates},
                 metadata={
@@ -224,7 +224,7 @@ class ScannerMCPServer:
                 # In production, would query from database
                 rejected = []
             
-            return ResourceResponse(
+            return(
                 type="rejected_candidates",
                 data={'rejected': rejected[:limit]},
                 metadata={
@@ -250,7 +250,7 @@ class ScannerMCPServer:
                     for scan in history
                 ]
             
-            return ResourceResponse(
+            return(
                 type="scan_history",
                 data={'history': history},
                 metadata={
@@ -267,7 +267,7 @@ class ScannerMCPServer:
             # Calculate performance metrics
             performance = await self._calculate_performance_metrics(timeframe)
             
-            return ResourceResponse(
+            return(
                 type="scanner_performance",
                 data=performance,
                 metadata={'timeframe': timeframe}
@@ -282,7 +282,7 @@ class ScannerMCPServer:
             # Get market data
             movers = await self._get_market_movers(mover_type, limit)
             
-            return ResourceResponse(
+            return(
                 type="market_movers",
                 data={
                     'type': mover_type,
@@ -294,7 +294,7 @@ class ScannerMCPServer:
         @self.mcp.resource("http://scanner/thresholds")
         async def get_scanner_thresholds() -> Dict:
             """Get current scanner thresholds"""
-            return ResourceResponse(
+            return(
                 type="scanner_thresholds",
                 data={
                     'static': self.scanner_config,
@@ -306,8 +306,8 @@ class ScannerMCPServer:
     def _register_tools(self):
         """Register MCP tools (write operations)"""
         
-        @self.server.tool("scan_market")
-        async def scan_market(params: ToolParams) -> Dict:
+        @self.mcp.tool("scan_market")
+        async def scan_market(params: dict) -> Dict:
             """Perform market scan for trading candidates"""
             mode = params.get('mode', 'normal')
             news_context = params.get('news_context', {})
@@ -322,7 +322,7 @@ class ScannerMCPServer:
                         last_scan_time = datetime.fromisoformat(last_scan)
                         time_since = (datetime.now() - last_scan_time).total_seconds()
                         if time_since < self.scanner_config['scan_frequency']:
-                            return ToolResponse(
+                            return(
                                 success=False,
                                 error=f"Scan frequency limit. Next scan in {self.scanner_config['scan_frequency'] - time_since:.0f} seconds"
                             )
@@ -402,7 +402,7 @@ class ScannerMCPServer:
                                    symbol=candidate['symbol'],
                                    score=candidate['score'])
                 
-                return ToolResponse(
+                return(
                     success=True,
                     data={
                         'scan_id': scan_id,
@@ -418,13 +418,13 @@ class ScannerMCPServer:
                 
             except Exception as e:
                 self.logger.error("Market scan failed", error=str(e))
-                return ToolResponse(
+                return(
                     success=False,
                     error=str(e)
                 )
         
-        @self.server.tool("force_rescan")
-        async def force_rescan(params: ToolParams) -> Dict:
+        @self.mcp.tool("force_rescan")
+        async def force_rescan(params: dict) -> Dict:
             """Force an immediate market rescan"""
             reason = params.get('reason', 'manual_trigger')
             clear_cache = params.get('clear_cache', True)
@@ -445,7 +445,7 @@ class ScannerMCPServer:
                 })
                 
                 if scan_result.success:
-                    return ToolResponse(
+                    return(
                         success=True,
                         data={
                             'scan_id': scan_result.data['scan_id'],
@@ -457,13 +457,13 @@ class ScannerMCPServer:
                     return scan_result
                     
             except Exception as e:
-                return ToolResponse(
+                return(
                     success=False,
                     error=str(e)
                 )
         
-        @self.server.tool("blacklist_symbol")
-        async def blacklist_symbol(params: ToolParams) -> Dict:
+        @self.mcp.tool("blacklist_symbol")
+        async def blacklist_symbol(params: dict) -> Dict:
             """Add or remove symbol from blacklist"""
             symbol = params['symbol'].upper()
             action = params.get('action', 'add')  # add or remove
@@ -497,7 +497,7 @@ class ScannerMCPServer:
                     self.logger.info("Symbol removed from blacklist",
                                    symbol=symbol)
                 
-                return ToolResponse(
+                return(
                     success=True,
                     data={
                         'symbol': symbol,
@@ -508,20 +508,20 @@ class ScannerMCPServer:
                 )
                 
             except Exception as e:
-                return ToolResponse(
+                return(
                     success=False,
                     error=str(e)
                 )
         
-        @self.server.tool("adjust_thresholds")
-        async def adjust_thresholds(params: ToolParams) -> Dict:
+        @self.mcp.tool("adjust_thresholds")
+        async def adjust_thresholds(params: dict) -> Dict:
             """Adjust dynamic scanner thresholds"""
             threshold_name = params['threshold_name']
             new_value = params['new_value']
             
             try:
                 if threshold_name not in self.dynamic_thresholds:
-                    return ToolResponse(
+                    return(
                         success=False,
                         error=f"Unknown threshold: {threshold_name}"
                     )
@@ -547,7 +547,7 @@ class ScannerMCPServer:
                                old_value=old_value,
                                new_value=new_value)
                 
-                return ToolResponse(
+                return(
                     success=True,
                     data={
                         'threshold': threshold_name,
@@ -558,13 +558,13 @@ class ScannerMCPServer:
                 )
                 
             except Exception as e:
-                return ToolResponse(
+                return(
                     success=False,
                     error=str(e)
                 )
         
-        @self.server.tool("analyze_candidate")
-        async def analyze_candidate(params: ToolParams) -> Dict:
+        @self.mcp.tool("analyze_candidate")
+        async def analyze_candidate(params: dict) -> Dict:
             """Deep analysis of a specific candidate"""
             symbol = params['symbol'].upper()
             include_technicals = params.get('include_technicals', True)
@@ -606,19 +606,19 @@ class ScannerMCPServer:
                 else:
                     analysis['recommendation'] = 'monitor'
                 
-                return ToolResponse(
+                return(
                     success=True,
                     data=analysis
                 )
                 
             except Exception as e:
-                return ToolResponse(
+                return(
                     success=False,
                     error=str(e)
                 )
         
-        @self.server.tool("clear_cache")
-        async def clear_cache(params: ToolParams) -> Dict:
+        @self.mcp.tool("clear_cache")
+        async def clear_cache(params: dict) -> Dict:
             """Clear scanner cache"""
             pattern = params.get("pattern", "scanner:*")
             
@@ -632,7 +632,7 @@ class ScannerMCPServer:
                 if keys:
                     await self.redis_client.delete(*keys)
                 
-                return ToolResponse(
+                return(
                     success=True,
                     data={
                         "cleared": len(keys),
@@ -641,7 +641,7 @@ class ScannerMCPServer:
                 )
                 
             except Exception as e:
-                return ToolResponse(
+                return(
                     success=False,
                     error=str(e)
                 )
