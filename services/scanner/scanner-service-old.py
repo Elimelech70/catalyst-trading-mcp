@@ -5,6 +5,31 @@ Name of file: scanner-service.py
 Version: 4.1.0
 Last Updated: 2025-08-23
 Purpose: MCP-enabled security scanner with database MCP integration
+
+REVISION HISTORY:
+v4.1.0 (2025-08-23) - Database MCP integration and missing features
+- Replaced all database operations with MCP Database Client
+- Added missing resources: scanner/history, candidates/rejected, scanner/performance
+- Added missing tools: force_rescan, blacklist_symbol, adjust_thresholds
+- Enhanced scan result persistence and history tracking
+- Added performance metrics and blacklisting support
+
+v4.0.1 (2025-01-31) - Fixed database_utils import issue
+- Removed dependency on non-existent database_utils module
+- Implemented database functions directly in service
+
+v4.0.0 (2024-12-30) - Complete MCP migration
+- Converted from Flask REST to MCP protocol
+- Resources for market data and candidate access
+- Tools for scanning and candidate selection
+- Maintains 100 security tracking, 5 for trading
+- Alpaca API integration preserved
+- Natural language interaction via Claude
+
+Description of Service:
+MCP server that scans markets for trading opportunities. Tracks top 100
+securities comprehensively while selecting top 5 for active trading.
+Enables Claude to discover and analyze market opportunities naturally.
 """
 
 import os
@@ -24,7 +49,9 @@ import yfinance as yf
 from mcp.server.fastmcp import FastMCP
 from mcp.server.stdio import stdio_server
 
-# Import MCP Database Client
+# Import MCP Database Client instead of database operations
+import sys
+sys.path.append("/app/shared")
 import sys
 sys.path.append("/app/shared")
 from mcp_database_client import MCPDatabaseClient
@@ -46,6 +73,7 @@ class ScannerMCPServer:
         self.redis_client: Optional[redis.Redis] = None
         
         # Service configuration
+        self.service_name = 'security-scanner'
         self.port = int(os.getenv('PORT', '5001'))
         self.log_level = os.getenv('LOG_LEVEL', 'INFO')
         
@@ -170,21 +198,21 @@ class ScannerMCPServer:
             for candidate in candidates:
                 candidate['blacklisted'] = candidate.get('symbol') in self.blacklisted_symbols
             
-            return {
-                'type': 'candidate_list',
-                'data': {'candidates': candidates},
-                'metadata': {
+            return(
+                type="candidate_list",
+                data={'candidates': candidates},
+                metadata={
                     'count': len(candidates),
                     'cached': cached is not None,
                     'max_candidates': self.scanner_config['max_candidates']
                 }
-            }
+            )
         
         @self.mcp.resource("http://candidates/rejected")
         async def get_rejected_candidates() -> Dict:
             """Get recently rejected candidates with rejection reasons"""
-            hours = 1  # Default
-            limit = 50  # Default
+            hours = params.get('hours', 1)
+            limit = params.get('limit', 50)
             
             # Get from cache
             cache_key = f"scanner:rejected_candidates:{hours}h"
@@ -193,23 +221,24 @@ class ScannerMCPServer:
             if cached:
                 rejected = json.loads(cached)
             else:
+                # In production, would query from database
                 rejected = []
             
-            return {
-                'type': 'rejected_candidates',
-                'data': {'rejected': rejected[:limit]},
-                'metadata': {
+            return(
+                type="rejected_candidates",
+                data={'rejected': rejected[:limit]},
+                metadata={
                     'count': len(rejected),
                     'hours': hours,
                     'reasons': self._get_rejection_reason_summary(rejected)
                 }
-            }
+            )
         
         @self.mcp.resource("http://scanner/history")
         async def get_scan_history() -> Dict:
             """Get scanner execution history"""
-            limit = 20  # Default
-            include_candidates = False  # Default
+            limit = params.get('limit', 20)
+            include_candidates = params.get('include_candidates', False)
             
             # Get recent history
             history = self.scan_history[-limit:]
@@ -221,58 +250,58 @@ class ScannerMCPServer:
                     for scan in history
                 ]
             
-            return {
-                'type': 'scan_history',
-                'data': {'history': history},
-                'metadata': {
+            return(
+                type="scan_history",
+                data={'history': history},
+                metadata={
                     'total_scans': len(self.scan_history),
                     'returned': len(history)
                 }
-            }
+            )
         
         @self.mcp.resource("http://scanner/performance")
         async def get_scanner_performance() -> Dict:
             """Get scanner performance metrics"""
-            timeframe = '24h'  # Default
+            timeframe = params.get('timeframe', '24h')
             
             # Calculate performance metrics
             performance = await self._calculate_performance_metrics(timeframe)
             
-            return {
-                'type': 'scanner_performance',
-                'data': performance,
-                'metadata': {'timeframe': timeframe}
-            }
+            return(
+                type="scanner_performance",
+                data=performance,
+                metadata={'timeframe': timeframe}
+            )
         
         @self.mcp.resource("http://market/movers")
         async def get_market_movers() -> Dict:
             """Get top market movers"""
-            mover_type = 'gainers'  # Default
-            limit = 10  # Default
+            mover_type = params.get('type', 'gainers')  # gainers, losers, volume
+            limit = params.get('limit', 10)
             
             # Get market data
             movers = await self._get_market_movers(mover_type, limit)
             
-            return {
-                'type': 'market_movers',
-                'data': {
+            return(
+                type="market_movers",
+                data={
                     'type': mover_type,
                     'movers': movers
                 },
-                'metadata': {'timestamp': datetime.now().isoformat()}
-            }
+                metadata={'timestamp': datetime.now().isoformat()}
+            )
         
         @self.mcp.resource("http://scanner/thresholds")
         async def get_scanner_thresholds() -> Dict:
             """Get current scanner thresholds"""
-            return {
-                'type': 'scanner_thresholds',
-                'data': {
+            return(
+                type="scanner_thresholds",
+                data={
                     'static': self.scanner_config,
                     'dynamic': self.dynamic_thresholds
                 },
-                'metadata': {'adjustable': list(self.dynamic_thresholds.keys())}
-            }
+                metadata={'adjustable': list(self.dynamic_thresholds.keys())}
+            )
     
     def _register_tools(self):
         """Register MCP tools (write operations)"""
@@ -293,10 +322,10 @@ class ScannerMCPServer:
                         last_scan_time = datetime.fromisoformat(last_scan)
                         time_since = (datetime.now() - last_scan_time).total_seconds()
                         if time_since < self.scanner_config['scan_frequency']:
-                            return {
-                                'success': False,
-                                'error': f"Scan frequency limit. Next scan in {self.scanner_config['scan_frequency'] - time_since:.0f} seconds"
-                            }
+                            return(
+                                success=False,
+                                error=f"Scan frequency limit. Next scan in {self.scanner_config['scan_frequency'] - time_since:.0f} seconds"
+                            )
                 
                 # Start scan
                 scan_id = f"scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -373,9 +402,9 @@ class ScannerMCPServer:
                                    symbol=candidate['symbol'],
                                    score=candidate['score'])
                 
-                return {
-                    'success': True,
-                    'data': {
+                return(
+                    success=True,
+                    data={
                         'scan_id': scan_id,
                         'candidates': candidates,
                         'summary': {
@@ -385,14 +414,14 @@ class ScannerMCPServer:
                             'duration': scan_duration
                         }
                     }
-                }
+                )
                 
             except Exception as e:
                 self.logger.error("Market scan failed", error=str(e))
-                return {
-                    'success': False,
-                    'error': str(e)
-                }
+                return(
+                    success=False,
+                    error=str(e)
+                )
         
         @self.mcp.tool("force_rescan")
         async def force_rescan(params: dict) -> Dict:
@@ -415,23 +444,23 @@ class ScannerMCPServer:
                     'news_context': {'reason': reason}
                 })
                 
-                if scan_result.get('success'):
-                    return {
-                        'success': True,
-                        'data': {
-                            'scan_id': scan_result['data']['scan_id'],
-                            'candidates_found': scan_result['data']['summary']['candidates_found'],
+                if scan_result.success:
+                    return(
+                        success=True,
+                        data={
+                            'scan_id': scan_result.data['scan_id'],
+                            'candidates_found': scan_result.data['summary']['candidates_found'],
                             'reason': reason
                         }
-                    }
+                    )
                 else:
                     return scan_result
                     
             except Exception as e:
-                return {
-                    'success': False,
-                    'error': str(e)
-                }
+                return(
+                    success=False,
+                    error=str(e)
+                )
         
         @self.mcp.tool("blacklist_symbol")
         async def blacklist_symbol(params: dict) -> Dict:
@@ -468,21 +497,21 @@ class ScannerMCPServer:
                     self.logger.info("Symbol removed from blacklist",
                                    symbol=symbol)
                 
-                return {
-                    'success': True,
-                    'data': {
+                return(
+                    success=True,
+                    data={
                         'symbol': symbol,
                         'action': action,
                         'blacklisted': symbol in self.blacklisted_symbols,
                         'total_blacklisted': len(self.blacklisted_symbols)
                     }
-                }
+                )
                 
             except Exception as e:
-                return {
-                    'success': False,
-                    'error': str(e)
-                }
+                return(
+                    success=False,
+                    error=str(e)
+                )
         
         @self.mcp.tool("adjust_thresholds")
         async def adjust_thresholds(params: dict) -> Dict:
@@ -492,10 +521,10 @@ class ScannerMCPServer:
             
             try:
                 if threshold_name not in self.dynamic_thresholds:
-                    return {
-                        'success': False,
-                        'error': f"Unknown threshold: {threshold_name}"
-                    }
+                    return(
+                        success=False,
+                        error=f"Unknown threshold: {threshold_name}"
+                    )
                 
                 # Validate value
                 if threshold_name == 'min_momentum_score':
@@ -518,21 +547,21 @@ class ScannerMCPServer:
                                old_value=old_value,
                                new_value=new_value)
                 
-                return {
-                    'success': True,
-                    'data': {
+                return(
+                    success=True,
+                    data={
                         'threshold': threshold_name,
                         'old_value': old_value,
                         'new_value': new_value,
                         'all_thresholds': self.dynamic_thresholds
                     }
-                }
+                )
                 
             except Exception as e:
-                return {
-                    'success': False,
-                    'error': str(e)
-                }
+                return(
+                    success=False,
+                    error=str(e)
+                )
         
         @self.mcp.tool("analyze_candidate")
         async def analyze_candidate(params: dict) -> Dict:
@@ -577,16 +606,16 @@ class ScannerMCPServer:
                 else:
                     analysis['recommendation'] = 'monitor'
                 
-                return {
-                    'success': True,
-                    'data': analysis
-                }
+                return(
+                    success=True,
+                    data=analysis
+                )
                 
             except Exception as e:
-                return {
-                    'success': False,
-                    'error': str(e)
-                }
+                return(
+                    success=False,
+                    error=str(e)
+                )
         
         @self.mcp.tool("clear_cache")
         async def clear_cache(params: dict) -> Dict:
@@ -603,19 +632,19 @@ class ScannerMCPServer:
                 if keys:
                     await self.redis_client.delete(*keys)
                 
-                return {
-                    'success': True,
-                    'data': {
+                return(
+                    success=True,
+                    data={
                         "cleared": len(keys),
                         "pattern": pattern
                     }
-                }
+                )
                 
             except Exception as e:
-                return {
-                    'success': False,
-                    'error': str(e)
-                }
+                return(
+                    success=False,
+                    error=str(e)
+                )
     
     async def _get_scan_universe(self, mode: str, news_context: Dict) -> List[str]:
         """Get universe of symbols to scan"""
@@ -1002,8 +1031,11 @@ class ScannerMCPServer:
                         port=self.port,
                         environment=os.getenv('ENVIRONMENT', 'development'))
         
-        # Run server with stdio transport
-        await stdio_server(self.mcp).run()
+        # Create WebSocket transport
+        transport = WebSocketTransport(host='0.0.0.0', port=self.port)
+        
+        # Run server
+        await self.server.run(transport)
 
 
 async def main():
