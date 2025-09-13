@@ -4,6 +4,7 @@
 scp -i ~/.ssh/catalyst_droplet root@68.183.177.11:/root/text.txt ./
 
 #Logs from Droplet
+scp -i ~/.ssh/catalyst_droplet root@68.183.177.11:/root/catalyst-trading-mcp/logs/combined.log ./
 
 #From VScode to Droplet
 #cd catalyst-trading-mcp folder

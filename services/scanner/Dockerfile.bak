@@ -33,7 +33,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the v41 service code
 #COPY scanner-service-v41.py scanner-service.py
 COPY *.py ./
-COPY ../../shared /app/shared
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1

@@ -125,7 +125,7 @@ async def initialize(ctx: Context):
         logger.error(f"Failed to initialize orchestration service: {e}")
         raise McpError(f"Initialization failed: {str(e)}")
 
-@mcp.on_cleanup()
+#@mcp.on_cleanup()
 async def cleanup(ctx: Context):
     """Clean up resources"""
     logger.info("Cleaning up orchestration service")
