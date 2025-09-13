@@ -17,6 +17,24 @@ version: '3.8'
 
 services:
   # Database Services
+  postgres:
+    image: postgres:15-alpine
+    container_name: catalyst-postgres
+    environment:
+      POSTGRES_DB: catalyst_trading
+      POSTGRES_USER: catalyst
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-secure_password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U catalyst"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   redis:
     image: redis:7-alpine
     container_name: catalyst-redis
@@ -36,13 +54,14 @@ services:
       context: ./services/orchestration
       dockerfile: Dockerfile
     container_name: catalyst-orchestration
-    env_file: 
-      - .config/.env
     environment:
+      DATABASE_URL: postgresql://catalyst:${DB_PASSWORD:-secure_password}@postgres:5432/catalyst_trading
       REDIS_URL: redis://redis:6379/0
       MCP_MODE: production
       SERVICE_PORT: 5000
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
     ports:
@@ -57,9 +76,8 @@ services:
       context: ./services/scanner
       dockerfile: Dockerfile
     container_name: catalyst-scanner
-    env_file: 
-      - .config/.env
     environment:
+      DATABASE_URL: postgresql://catalyst:${DB_PASSWORD:-secure_password}@postgres:5432/catalyst_trading
       REDIS_URL: redis://redis:6379/0
       NEWS_URL: http://news:5008
       ALPACA_API_KEY: ${ALPACA_API_KEY}
@@ -68,7 +86,9 @@ services:
       #ALPACA_SECRET_KEY: 6VvdVlR9h5KcH9BXxLIa4XqHlX8VS0AKbWQcZood
       SERVICE_PORT: 5001
     depends_on:
-        redis:
+      postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     ports:
       - "5001:5001"
@@ -82,12 +102,13 @@ services:
       context: ./services/news
       dockerfile: Dockerfile
     container_name: catalyst-news
-    env_file: 
-      - .config/.env    
     environment:
+      DATABASE_URL: postgresql://catalyst:${DB_PASSWORD:-secure_password}@postgres:5432/catalyst_trading
       REDIS_URL: redis://redis:6379/0
       SERVICE_PORT: 5008
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
     ports:
@@ -102,12 +123,13 @@ services:
       context: ./services/pattern
       dockerfile: Dockerfile
     container_name: catalyst-pattern
-    env_file: 
-      - .config/.env
     environment:
+      DATABASE_URL: postgresql://catalyst:${DB_PASSWORD:-secure_password}@postgres:5432/catalyst_trading
       REDIS_URL: redis://redis:6379/0
       SERVICE_PORT: 5002
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
     ports:
@@ -122,14 +144,15 @@ services:
       context: ./services/risk-manager
       dockerfile: Dockerfile
     container_name: catalyst-risk
-    env_file: 
-      - .config/.env
     environment:
+      DATABASE_URL: postgresql://catalyst:${DB_PASSWORD:-secure_password}@postgres:5432/catalyst_trading
       REDIS_URL: redis://redis:6379/0
       SERVICE_PORT: 5004
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
-      condition: service_healthy
+        condition: service_healthy
     ports:
       - "5004:5004"
     volumes:
@@ -142,9 +165,8 @@ services:
       context: ./services/trading
       dockerfile: Dockerfile
     container_name: catalyst-trading
-    env_file: 
-      - .config/.env
     environment:
+      DATABASE_URL: postgresql://catalyst:${DB_PASSWORD:-secure_password}@postgres:5432/catalyst_trading
       REDIS_URL: redis://redis:6379/0
       #ALPACA_API_KEY: ${ALPACA_API_KEY}
       #ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY}
@@ -152,6 +174,8 @@ services:
       ALPACA_SECRET_KEY: 6VvdVlR9h5KcH9BXxLIa4XqHlX8VS0AKbWQcZood
       SERVICE_PORT: 5005
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
       risk-manager:
@@ -168,14 +192,15 @@ services:
       context: ./services/reporting
       dockerfile: Dockerfile
     container_name: catalyst-reporting
-    env_file: 
-      - .config/.env
     environment:
+      DATABASE_URL: postgresql://catalyst:${DB_PASSWORD:-secure_password}@postgres:5432/catalyst_trading
       REDIS_URL: redis://redis:6379/0
       SERVICE_PORT: 5009
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
-      condition: service_healthy
+        condition: service_healthy
     ports:
       - "5009:5009"
     volumes:
@@ -185,7 +210,9 @@ services:
 
 # Volumes
 volumes:
-    redis_data:
+  postgres_data:
+    driver: local
+  redis_data:
     driver: local
 
 # Networks (optional, uses default bridge if not specified)
