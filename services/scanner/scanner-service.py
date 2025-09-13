@@ -968,7 +968,7 @@ class ScannerMCPServer:
         """Service health check"""
         try:
             # Check database connection
-            db_status = # await self.db_client.get_database_status()
+            db_status = await self.db_client.get_database_status()
             
             # Check Redis connection
             redis_ok = await self.redis_client.ping() if self.redis_client else False
