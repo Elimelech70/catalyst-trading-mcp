@@ -134,7 +134,7 @@ class ScannerMCPServer:
         if self.redis_client:
             await self.redis_client.close()
             
-        if self.db_client:
+        #if self.db_client:
             # await self.db_client.disconnect()
     
     async def _load_configuration(self):
