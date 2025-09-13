@@ -192,7 +192,10 @@ ssh catalyst-trading
 # Copy files to droplet
 scp file.txt catalyst-trading:/root/
 
-# Copy files from droplet
+#Copy .env to ./config
+scp .env 
+
+# Copy files from droplet 
 scp catalyst-trading:/root/file.txt ./
 
 # Port forwarding (access services locally)
