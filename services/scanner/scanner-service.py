@@ -183,7 +183,7 @@ class ScannerMCPServer:
     def _register_resources(self):
         """Register MCP resources (read operations)"""
         
-        @self.server.resource("candidates/active")
+        @self.mcp.resource("candidates/active")
         async def get_active_candidates(params: ResourceParams) -> Dict:
             """Get currently active trading candidates"""
             # Get from cache
@@ -208,7 +208,7 @@ class ScannerMCPServer:
                 }
             )
         
-        @self.server.resource("candidates/rejected")
+        @self.mcp.resource("candidates/rejected")
         async def get_rejected_candidates(params: ResourceParams) -> Dict:
             """Get recently rejected candidates with rejection reasons"""
             hours = params.get('hours', 1)
@@ -234,7 +234,7 @@ class ScannerMCPServer:
                 }
             )
         
-        @self.server.resource("scanner/history")
+        @self.mcp.resource("scanner/history")
         async def get_scan_history(params: ResourceParams) -> Dict:
             """Get scanner execution history"""
             limit = params.get('limit', 20)
@@ -259,7 +259,7 @@ class ScannerMCPServer:
                 }
             )
         
-        @self.server.resource("scanner/performance")
+        @self.mcp.resource("scanner/performance")
         async def get_scanner_performance(params: ResourceParams) -> Dict:
             """Get scanner performance metrics"""
             timeframe = params.get('timeframe', '24h')
@@ -273,7 +273,7 @@ class ScannerMCPServer:
                 metadata={'timeframe': timeframe}
             )
         
-        @self.server.resource("market/movers")
+        @self.mcp.resource("market/movers")
         async def get_market_movers(params: ResourceParams) -> Dict:
             """Get top market movers"""
             mover_type = params.get('type', 'gainers')  # gainers, losers, volume
@@ -291,7 +291,7 @@ class ScannerMCPServer:
                 metadata={'timestamp': datetime.now().isoformat()}
             )
         
-        @self.server.resource("scanner/thresholds")
+        @self.mcp.resource("scanner/thresholds")
         async def get_scanner_thresholds(params: ResourceParams) -> Dict:
             """Get current scanner thresholds"""
             return ResourceResponse(

@@ -744,7 +744,7 @@ if __name__ == "__main__":
     print("=" * 60)
     
     try:
-        mcp.run(port=5000)
+        mcp.run()
     except KeyboardInterrupt:
         print("\n" + "=" * 60)
         print("Service stopped by user")
