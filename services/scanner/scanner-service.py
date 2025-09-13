@@ -52,6 +52,8 @@ from mcp.server.stdio import stdio_server
 # Import MCP Database Client instead of database operations
 import sys
 sys.path.append("/app/shared")
+import sys
+sys.path.append("/app/shared")
 from mcp_database_client import MCPDatabaseClient
 
 
