@@ -1,34 +1,39 @@
 # Name of Application: Catalyst Trading System
 # Name of file: docker-compose.yml
-# Version: 4.1.0
-# Last Updated: 2025-08-31
-# Purpose: Docker Compose configuration for v41 services
+# Version: 4.2.0
+# Last Updated: 2025-09-13
+# Purpose: Docker Compose configuration with DigitalOcean Managed PostgreSQL
 
 # REVISION HISTORY:
-# v4.1.0 (2025-08-31) - Updated for v41 service architecture
-# - All services aligned with v41 naming
-# - Health checks and proper dependencies
-# - Volume management for logs and data
+# v4.2.0 (2025-09-13) - Fixed to use DigitalOcean Managed PostgreSQL
+# - Removed local PostgreSQL container
+# - All services use cloud DATABASE_URL from .env
+# - Fixed environment variable references
+# - Proper health checks and dependencies
+# v4.1.0 (2025-08-31) - Previous version with local PostgreSQL
 
 # Description of Service:
 # Complete docker-compose setup for Catalyst Trading MCP system
+# using DigitalOcean Managed PostgreSQL cloud service
 
 version: '3.8'
 
 services:
-  # Database Services
+  # Cache Service (Local Redis)
   redis:
     image: redis:7-alpine
     container_name: catalyst-redis
+    command: redis-server --requirepass ${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}
     ports:
       - "6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
   # Orchestration Service (v41)
   orchestration:
@@ -39,9 +44,13 @@ services:
     env_file: 
       - .config/.env
     environment:
-      REDIS_URL: redis://redis:6379/0
+      # Database connection to DigitalOcean Managed PostgreSQL
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}@redis:6379/0
       MCP_MODE: production
       SERVICE_PORT: 5000
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       redis:
         condition: service_healthy
@@ -50,6 +59,11 @@ services:
     volumes:
       - ./logs/orchestration:/app/logs
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   # Scanner Service (v41)
   scanner:
@@ -60,21 +74,32 @@ services:
     env_file: 
       - .config/.env
     environment:
-      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}@redis:6379/0
       NEWS_URL: http://news:5008
       ALPACA_API_KEY: ${ALPACA_API_KEY}
       ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY}
-      #ALPACA_API_KEY: PK8ZTV60LQ83FALFQ2G4
-      #ALPACA_SECRET_KEY: 6VvdVlR9h5KcH9BXxLIa4XqHlX8VS0AKbWQcZood
+      ALPACA_BASE_URL: ${ALPACA_BASE_URL:-https://paper-api.alpaca.markets}
       SERVICE_PORT: 5001
+      INITIAL_UNIVERSE_SIZE: ${INITIAL_UNIVERSE_SIZE:-200}
+      TOP_TRACKING_SIZE: ${TOP_TRACKING_SIZE:-100}
+      CATALYST_FILTER_SIZE: ${CATALYST_FILTER_SIZE:-50}
+      FINAL_SELECTION_SIZE: ${FINAL_SELECTION_SIZE:-5}
     depends_on:
-        redis:
+      redis:
         condition: service_healthy
+      orchestration:
+        condition: service_started
     ports:
       - "5001:5001"
     volumes:
       - ./logs/scanner:/app/logs
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   # News Scanner Service
   news:
@@ -85,8 +110,12 @@ services:
     env_file: 
       - .config/.env    
     environment:
-      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}@redis:6379/0
       SERVICE_PORT: 5008
+      NEWS_API_KEY: ${NEWS_API_KEY}
+      ALPHA_VANTAGE_API_KEY: ${ALPHA_VANTAGE_API_KEY}
+      FINNHUB_API_KEY: ${FINNHUB_API_KEY}
     depends_on:
       redis:
         condition: service_healthy
@@ -95,6 +124,11 @@ services:
     volumes:
       - ./logs/news:/app/logs
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5008/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   # Pattern Detection Service
   pattern:
@@ -105,7 +139,8 @@ services:
     env_file: 
       - .config/.env
     environment:
-      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}@redis:6379/0
       SERVICE_PORT: 5002
     depends_on:
       redis:
@@ -115,6 +150,11 @@ services:
     volumes:
       - ./logs/pattern:/app/logs
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   # Risk Manager Service
   risk-manager:
@@ -125,16 +165,26 @@ services:
     env_file: 
       - .config/.env
     environment:
-      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}@redis:6379/0
       SERVICE_PORT: 5004
+      MAX_DAILY_LOSS: ${MAX_DAILY_LOSS:-2000}
+      MAX_POSITION_RISK: ${MAX_POSITION_RISK:-0.02}
+      POSITION_SIZE_MULTIPLIER: ${POSITION_SIZE_MULTIPLIER:-1.0}
+      RISK_FREE_RATE: ${RISK_FREE_RATE:-0.05}
     depends_on:
       redis:
-      condition: service_healthy
+        condition: service_healthy
     ports:
       - "5004:5004"
     volumes:
       - ./logs/risk:/app/logs
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   # Trading Service
   trading:
@@ -145,22 +195,35 @@ services:
     env_file: 
       - .config/.env
     environment:
-      REDIS_URL: redis://redis:6379/0
-      #ALPACA_API_KEY: ${ALPACA_API_KEY}
-      #ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY}
-      ALPACA_API_KEY: PK8ZTV60LQ83FALFQ2G4
-      ALPACA_SECRET_KEY: 6VvdVlR9h5KcH9BXxLIa4XqHlX8VS0AKbWQcZood
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}@redis:6379/0
+      ALPACA_API_KEY: ${ALPACA_API_KEY}
+      ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY}
+      ALPACA_BASE_URL: ${ALPACA_BASE_URL:-https://paper-api.alpaca.markets}
       SERVICE_PORT: 5005
+      TRADING_ENABLED: ${TRADING_ENABLED:-true}
+      MAX_POSITIONS: ${MAX_POSITIONS:-5}
+      MAX_POSITION_SIZE: ${MAX_POSITION_SIZE:-1000}
+      MIN_SIGNAL_CONFIDENCE: ${MIN_SIGNAL_CONFIDENCE:-60}
+      STOP_LOSS_PCT: ${STOP_LOSS_PCT:-2.0}
+      TAKE_PROFIT_PCT: ${TAKE_PROFIT_PCT:-4.0}
     depends_on:
       redis:
         condition: service_healthy
       risk-manager:
+        condition: service_started
+      orchestration:
         condition: service_started
     ports:
       - "5005:5005"
     volumes:
       - ./logs/trading:/app/logs
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5005/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   # Reporting Service
   reporting:
@@ -171,24 +234,33 @@ services:
     env_file: 
       - .config/.env
     environment:
-      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}@redis:6379/0
       SERVICE_PORT: 5009
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL}
+      EMAIL_ALERTS_ENABLED: ${EMAIL_ALERTS_ENABLED:-false}
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL}
     depends_on:
       redis:
-      condition: service_healthy
+        condition: service_healthy
     ports:
       - "5009:5009"
     volumes:
       - ./logs/reporting:/app/logs
       - ./reports:/app/reports
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5009/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
-# Volumes
+# Volumes (only Redis data, no PostgreSQL as it's cloud-managed)
 volumes:
-    redis_data:
+  redis_data:
     driver: local
 
-# Networks (optional, uses default bridge if not specified)
+# Networks
 networks:
   default:
     name: catalyst-network
