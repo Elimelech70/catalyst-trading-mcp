@@ -73,7 +73,7 @@ services:
   # Scanner Service (v41)
   scanner:
     build:
-      context: ./services/security-scanner
+      context: ./services/scanner
       dockerfile: Dockerfile
     container_name: catalyst-scanner
     environment:
@@ -97,7 +97,7 @@ services:
   # News Scanner Service
   news:
     build:
-      context: ./services/news-scanner
+      context: ./services/news
       dockerfile: Dockerfile
     container_name: catalyst-news
     environment:
