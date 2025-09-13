@@ -27,7 +27,7 @@ from mcp.server.stdio import stdio_server
 # Import MCP Database Client
 import sys
 sys.path.append("/app/shared")
-from mcp_database_client import MCPDatabaseClient
+# from mcp_database_client import MCPDatabaseClient
 
 
 class ScannerMCPServer:
@@ -110,10 +110,10 @@ class ScannerMCPServer:
     async def initialize(self):
         """Initialize async components"""
         # Initialize database client
-        self.db_client = MCPDatabaseClient(
+        # self.db_client = MCPDatabaseClient(
             os.getenv('DATABASE_MCP_URL', 'ws://database-service:5010')
         )
-        await self.db_client.connect()
+        # await self.db_client.connect()
         
         # Initialize Redis
         self.redis_client = await redis.from_url(
@@ -135,7 +135,7 @@ class ScannerMCPServer:
             await self.redis_client.close()
             
         if self.db_client:
-            await self.db_client.disconnect()
+            # await self.db_client.disconnect()
     
     async def _load_configuration(self):
         """Load saved configuration from cache"""
@@ -342,7 +342,7 @@ class ScannerMCPServer:
                 }
                 
                 # Persist to database
-                await self.db_client.persist_scan_results({
+                # await self.db_client.persist_scan_results({
                     'scan_id': scan_id,
                     'timestamp': scan_start,
                     'candidates': candidates,
@@ -968,7 +968,7 @@ class ScannerMCPServer:
         """Service health check"""
         try:
             # Check database connection
-            db_status = await self.db_client.get_database_status()
+            db_status = # await self.db_client.get_database_status()
             
             # Check Redis connection
             redis_ok = await self.redis_client.ping() if self.redis_client else False
