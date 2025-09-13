@@ -197,7 +197,7 @@ async def get_pending_signals(ctx: Context) -> Dict:
     }
 
 # Market Resources
-@mcp.resource("market/scan/latest")
+@mcp.resource("http://market/scan/latest")
 async def get_latest_scan(ctx: Context) -> Dict:
     """Get results from the latest market scan"""
     try:
@@ -210,7 +210,7 @@ async def get_latest_scan(ctx: Context) -> Dict:
         logger.error(f"Failed to get latest scan: {e}")
         raise McpError(f"Failed to retrieve scan results: {str(e)}")
 
-@mcp.resource("market/news/catalysts")
+@mcp.resource("http://market/news/catalysts")
 async def get_news_catalysts(ctx: Context) -> Dict:
     """Get current news catalysts"""
     try:
@@ -224,7 +224,7 @@ async def get_news_catalysts(ctx: Context) -> Dict:
         raise McpError(f"Failed to retrieve catalysts: {str(e)}")
 
 # Performance Resources
-@mcp.resource("performance/daily")
+@mcp.resource("http://performance/daily")
 async def get_daily_performance(ctx: Context) -> Dict:
     """Get today's trading performance"""
     try:
@@ -237,7 +237,7 @@ async def get_daily_performance(ctx: Context) -> Dict:
         logger.error(f"Failed to get daily performance: {e}")
         raise McpError(f"Failed to retrieve performance: {str(e)}")
 
-@mcp.resource("performance/cycle/{cycle_id}")
+@mcp.resource("http://performance/cycle/{cycle_id}")
 async def get_cycle_performance(ctx: Context, cycle_id: str) -> Dict:
     """Get performance for a specific trading cycle"""
     try:

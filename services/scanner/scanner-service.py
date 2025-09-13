@@ -61,6 +61,7 @@ class ScannerMCPServer:
     """MCP Server for market scanning and security selection"""
     
     def __init__(self):
+        self.service_name = "scanner"
         # Initialize MCP server
         self.mcp = FastMCP("security-scanner")
         self.setup_logging()
