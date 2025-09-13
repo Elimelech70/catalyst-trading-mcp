@@ -139,7 +139,7 @@ async def cleanup(ctx: Context):
 # === HIERARCHICAL RESOURCES ===
 
 # System Resources
-@mcp.resource("system/health")
+@mcp.resource("http://system/health")
 async def get_system_health(ctx: Context) -> Dict:
     """Get overall system health status"""
     return {
@@ -148,7 +148,7 @@ async def get_system_health(ctx: Context) -> Dict:
         "timestamp": datetime.now().isoformat()
     }
 
-@mcp.resource("system/configuration")
+@mcp.resource("http://system/configuration")
 async def get_system_configuration(ctx: Context) -> Dict:
     """Get current system configuration"""
     return {
@@ -164,7 +164,7 @@ async def get_system_configuration(ctx: Context) -> Dict:
     }
 
 # Trading Resources
-@mcp.resource("trading/cycle/current")
+@mcp.resource("http://trading/cycle/current")
 async def get_current_cycle(ctx: Context) -> Dict:
     """Get current trading cycle status"""
     if not state.current_cycle:
