@@ -132,7 +132,7 @@ class ScannerMCPServer:
     async def cleanup(self):
         """Clean up resources"""
         if self.redis_client:
-            await self.redis_client.close()
+            await self.redis_client.aclose()
             
         #if self.db_client:
             # await self.db_client.disconnect()
@@ -1003,7 +1003,8 @@ class ScannerMCPServer:
                         environment=os.getenv('ENVIRONMENT', 'development'))
         
         # Run server with stdio transport
-        await stdio_server(self.mcp).run()
+        async with stdio_server(self.mcp) as server:
+            await server
 
 
 async def main():
