@@ -1003,8 +1003,6 @@ class ScannerMCPServer:
                         environment=os.getenv('ENVIRONMENT', 'development'))
         
         # Run server with stdio transport
-        async with stdio_server(self.mcp) as server:
-            await server
 
 
 async def main():
