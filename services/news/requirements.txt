@@ -22,6 +22,7 @@ pandas>=2.1.4
 numpy>=1.26.2
 python-dateutil>=2.8.2
 pytz>=2024.1
+nltk>=3.8
 
 # Configuration and logging
 python-dotenv>=1.0.1
