@@ -183,7 +183,7 @@ class ScannerMCPServer:
     def _register_resources(self):
         """Register MCP resources (read operations)"""
         
-        @self.mcp.resource("candidates/active")
+        @self.mcp.resource("http://candidates/active")
         async def get_active_candidates() -> Dict:
             """Get currently active trading candidates"""
             # Get from cache
@@ -208,7 +208,7 @@ class ScannerMCPServer:
                 }
             )
         
-        @self.mcp.resource("candidates/rejected")
+        @self.mcp.resource("http://candidates/rejected")
         async def get_rejected_candidates() -> Dict:
             """Get recently rejected candidates with rejection reasons"""
             hours = params.get('hours', 1)
@@ -259,7 +259,7 @@ class ScannerMCPServer:
                 }
             )
         
-        @self.mcp.resource("scanner/performance")
+        @self.mcp.resource("http://scanner/performance")
         async def get_scanner_performance() -> Dict:
             """Get scanner performance metrics"""
             timeframe = params.get('timeframe', '24h')
@@ -273,7 +273,7 @@ class ScannerMCPServer:
                 metadata={'timeframe': timeframe}
             )
         
-        @self.mcp.resource("market/movers")
+        @self.mcp.resource("http://market/movers")
         async def get_market_movers() -> Dict:
             """Get top market movers"""
             mover_type = params.get('type', 'gainers')  # gainers, losers, volume
@@ -291,7 +291,7 @@ class ScannerMCPServer:
                 metadata={'timestamp': datetime.now().isoformat()}
             )
         
-        @self.mcp.resource("scanner/thresholds")
+        @self.mcp.resource("http://scanner/thresholds")
         async def get_scanner_thresholds() -> Dict:
             """Get current scanner thresholds"""
             return ResourceResponse(
