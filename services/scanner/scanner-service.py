@@ -112,7 +112,7 @@ class ScannerMCPServer:
         # Initialize database client
         # self.db_client = MCPDatabaseClient(
         os.getenv('DATABASE_MCP_URL', 'ws://database-service:5010')
-        )
+    )
         # await self.db_client.connect()
         
         # Initialize Redis
