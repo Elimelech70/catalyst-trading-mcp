@@ -80,10 +80,10 @@ services:
       DATABASE_URL: postgresql://catalyst:${DB_PASSWORD:-secure_password}@postgres:5432/catalyst_trading
       REDIS_URL: redis://redis:6379/0
       NEWS_URL: http://news:5008
-      #ALPACA_API_KEY: ${ALPACA_API_KEY}
-      #ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY}
-      ALPACA_API_KEY: PK8ZTV60LQ83FALFQ2G4
-      ALPACA_SECRET_KEY: 6VvdVlR9h5KcH9BXxLIa4XqHlX8VS0AKbWQcZood
+      ALPACA_API_KEY: ${ALPACA_API_KEY}
+      ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY}
+      #ALPACA_API_KEY: PK8ZTV60LQ83FALFQ2G4
+      #ALPACA_SECRET_KEY: 6VvdVlR9h5KcH9BXxLIa4XqHlX8VS0AKbWQcZood
       SERVICE_PORT: 5001
     depends_on:
       postgres:
