@@ -343,11 +343,11 @@ class ScannerMCPServer:
                 
                 # Persist to database
                 # await self.db_client.persist_scan_results({
-                    'scan_id': scan_id,
-                    'timestamp': scan_start,
-                    'candidates': candidates,
-                    'metadata': scan_result
-                })
+                 #   'scan_id': scan_id,
+                #    'timestamp': scan_start,
+                #    'candidates': candidates,
+                #    'metadata': scan_result
+                #})
                 
                 # Cache results
                 await self.redis_client.setex(
