@@ -1,18 +1,3 @@
-
-
-
-# Stop everything first
-./scripts/catalyst-mcp.sh stop
-
-🏗️ Rebuild Everything:# Force rebuild all images
-docker-compose build --no-cache
-
-# This will take a few minutes but ensures clean containers🚀 Start Again:# Start services
-./scripts/catalyst-mcp.sh start
-
-#----------------------------------------------
-# Script to get all logs
-#----------------------------------------------
 # Save each service log to its own file
 for service in orchestration risk-manager scanner pattern trading news reporting; do \
   docker-compose logs $service --tail=50 > logs/$service.log 2>&1; \
