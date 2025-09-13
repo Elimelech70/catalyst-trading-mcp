@@ -73,8 +73,6 @@ services:
   # Scanner Service (v41)
   scanner:
     build:
-      env_file:
-        - .env
       context: ./services/scanner
       dockerfile: Dockerfile
     container_name: catalyst-scanner
