@@ -4,8 +4,8 @@ asyncio-mqtt>=0.13.0
 
 # Web framework (MCP compatible versions)  
 fastapi>=0.115.12
-uvicorn[standard]>=0.31.1
-python-multipart>=0.0.9
+uvicorn[standard]>=0.30
+python-multipart>=0.0.6
 
 # Database
 asyncpg>=0.29.0
@@ -25,7 +25,8 @@ pytz>=2024.1
 
 # Configuration and logging
 python-dotenv>=1.0.1
-pydantic>=2.7.2
+#pydantic>=2.7.2
+pydantic>=2.11.0,<3.0.0 
 structlog>=24.1.0
 
 # Utilities
