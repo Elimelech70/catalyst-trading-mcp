@@ -1,0 +1,35 @@
+{
+  "mcpServers": {
+    "catalyst-trading": {
+      "command": "python",
+      "args": [
+        "C:/path/to/your/catalyst-trading-mcp/catalyst_mcp_server.py"
+      ],
+      "env": {
+        "TRADING_API_KEY": "your-exchange-api-key",
+        "TRADING_SECRET": "your-exchange-secret",
+        "TRADING_MODE": "paper",
+        "LOG_LEVEL": "INFO"
+      },
+      "description": "Catalyst Trading System - AI-powered trading assistant"
+    },
+    "catalyst-alternative": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@elimelech70/catalyst-trading-mcp"
+      ],
+      "env": {
+        "TRADING_API_KEY": "your-api-key",
+        "TRADING_MODE": "paper"
+      },
+      "description": "Alternative npm-based installation"
+    }
+  },
+  "settings": {
+    "autoStart": true,
+    "reconnectOnFailure": true,
+    "maxReconnectAttempts": 5,
+    "reconnectDelay": 5000
+  }
+}
