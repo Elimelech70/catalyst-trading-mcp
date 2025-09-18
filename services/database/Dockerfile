@@ -26,20 +26,11 @@ RUN apt-get update && apt-get install -y \
     python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first for better caching
-COPY requirements.txt .
+# Copy requirements from the database service directory
+COPY services/database/requirements.txt .
 
-# Install Python dependencies
-RUN pip install --no-cache-dir \
-    asyncpg==0.29.0 \
-    redis==5.0.1 \
-    mcp==1.0.0 \
-    fastmcp==0.1.0 \
-    structlog==24.1.0 \
-    python-dotenv==1.0.0 \
-    aiohttp==3.9.1 \
-    websockets==12.0 \
-    pydantic==2.5.0
+# Install Python dependencies from requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy shared utilities and database service
 COPY services/shared/ ./services/shared/
@@ -60,5 +51,5 @@ EXPOSE 5010
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD python -c "import aiohttp, asyncio; asyncio.run(aiohttp.ClientSession().get('http://localhost:5010/health'))" || exit 1
 
-# Run the database MCP service
+# Run the database MCP service (it's in the root directory after copying)
 CMD ["python", "database-mcp-service.py"]
