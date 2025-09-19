@@ -1,579 +1,498 @@
 #!/usr/bin/env python3
+"""
+Name of Application: Catalyst Trading System
+Name of file: scanner-service.py
+Version: 5.0.0
+Last Updated: 2025-09-19
+Purpose: Scanner service with REST API and direct database persistence
 
-# Name of Application: Catalyst Trading System
-# Name of file: scanner-service.py
-# Version: 4.1.0
-# Last Updated: 2025-09-13
-# Purpose: Security scanner with REST API and MCP support
+REVISION HISTORY:
+v5.0.0 (2025-09-19) - REST API architecture with direct DB
+- Removed MCP database client dependency
+- Direct asyncpg connection to DigitalOcean PostgreSQL
+- FastAPI REST endpoints for service communication
+- Fixed data persistence issue
+- Proper health checks
 
-# REVISION HISTORY:
-# v4.1.0 (2025-09-13) - Fixed to run both REST and MCP servers
-# - Added FastAPI REST endpoints
-# - Fixed run() method to actually start servers
-# - Database and Redis integration
-
-# Description of Service:
-# Market scanner that finds trading candidates based on momentum,
-# volume, and news catalysts. Provides both REST API and MCP interfaces.
+Description of Service:
+Market scanner that identifies trading opportunities using REST API
+for inter-service communication and direct database persistence.
+"""
 
 import os
-import json
 import asyncio
-import logging
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any, Set
-import numpy as np
-from structlog import get_logger
+import asyncpg
 import redis.asyncio as redis
-import aiohttp
-import pandas as pd
-import yfinance as yf
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 import uvicorn
-import asyncpg
-from concurrent.futures import ThreadPoolExecutor
-import threading
+from pydantic import BaseModel
+from typing import Dict, List, Optional, Any
+from datetime import datetime, timedelta
+import json
+import logging
+import alpaca_trade_api as tradeapi
 
-# Initialize FastAPI app
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("scanner-service")
+
+# FastAPI app
 app = FastAPI(
     title="Scanner Service",
-    version="4.1.0",
-    description="Market scanner for trading candidates"
+    version="5.0.0",
+    description="Market scanner with REST API"
 )
 
-# Global scanner instance
-scanner_instance = None
+# Global connections
+db_pool: Optional[asyncpg.Pool] = None
+redis_client: Optional[redis.Redis] = None
+alpaca_client: Optional[tradeapi.REST] = None
 
-class ScannerService:
-    """Scanner Service with REST API"""
-    
-    def __init__(self):
-        self.service_name = "scanner"
-        self.setup_logging()
+# Configuration
+SCAN_CONFIG = {
+    'initial_universe_size': int(os.getenv('INITIAL_UNIVERSE_SIZE', '200')),
+    'top_tracking_size': int(os.getenv('TOP_TRACKING_SIZE', '100')),
+    'catalyst_filter_size': int(os.getenv('CATALYST_FILTER_SIZE', '50')),
+    'final_selection_size': int(os.getenv('FINAL_SELECTION_SIZE', '5')),
+    'scan_frequency': int(os.getenv('SCAN_FREQUENCY', '300'))  # 5 minutes
+}
+
+# ========== PYDANTIC MODELS ==========
+
+class ScanRequest(BaseModel):
+    mode: str = "normal"
+    max_candidates: int = 5
+    news_context: Optional[Dict] = None
+    symbols: Optional[List[str]] = None
+
+class ScanResult(BaseModel):
+    scan_id: str
+    timestamp: str
+    mode: str
+    candidates_found: int
+    candidates: List[Dict]
+    metadata: Dict
+
+class CandidateScore(BaseModel):
+    symbol: str
+    momentum_score: float
+    volume_score: float
+    catalyst_score: float
+    composite_score: float
+    metadata: Dict
+
+# ========== DATABASE CONNECTION ==========
+
+async def get_db_pool() -> asyncpg.Pool:
+    """Get or create database connection pool"""
+    global db_pool
+    if not db_pool:
+        database_url = os.getenv('DATABASE_URL')
+        if not database_url:
+            raise ValueError("DATABASE_URL environment variable not set")
         
-        # Database connection
-        self.db_pool: Optional[asyncpg.Pool] = None
-        
-        # Redis client for caching
-        self.redis_client: Optional[redis.Redis] = None
-        
-        # Service configuration
-        self.port = int(os.getenv('SERVICE_PORT', '5001'))
-        self.log_level = os.getenv('LOG_LEVEL', 'INFO')
-        
-        # Alpaca API configuration
-        self.alpaca_api_key = os.getenv('ALPACA_API_KEY')
-        self.alpaca_secret_key = os.getenv('ALPACA_SECRET_KEY')
-        self.alpaca_base_url = os.getenv('ALPACA_BASE_URL', 'https://paper-api.alpaca.markets')
-        
-        # Scanner configuration
-        self.scanner_config = {
-            'initial_universe_size': int(os.getenv('INITIAL_UNIVERSE_SIZE', '200')),
-            'top_tracking_size': int(os.getenv('TOP_TRACKING_SIZE', '100')),
-            'catalyst_filter_size': int(os.getenv('CATALYST_FILTER_SIZE', '50')),
-            'final_selection_size': int(os.getenv('FINAL_SELECTION_SIZE', '5')),
-            'min_volume': int(os.getenv('MIN_VOLUME', '1000000')),
-            'min_price': float(os.getenv('MIN_PRICE', '5.0')),
-            'max_price': float(os.getenv('MAX_PRICE', '500.0')),
-            'min_catalyst_score': float(os.getenv('MIN_CATALYST_SCORE', '0.3')),
-            'scan_frequency': int(os.getenv('SCAN_FREQUENCY_SECONDS', '300'))
-        }
-        
-        # Dynamic thresholds
-        self.dynamic_thresholds = {
-            'min_momentum_score': 50,
-            'min_volume_ratio': 1.5,
-            'min_price_change': 0.02,
-            'max_spread_pct': 1.0
-        }
-        
-        # Blacklisted symbols
-        self.blacklisted_symbols: Set[str] = set()
-        
-        # Scan history
-        self.scan_history = []
-        self.max_history_size = 100
-        
-        # Default universe
-        self.default_universe = [
-            'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'TSLA', 'NVDA', 'JPM',
-            'JNJ', 'V', 'PG', 'UNH', 'HD', 'MA', 'DIS', 'PYPL', 'BAC', 'NFLX',
-            'ADBE', 'CRM', 'XOM', 'VZ', 'CMCSA', 'PFE', 'INTC', 'CSCO', 'T',
-            'PEP', 'ABT', 'CVX', 'NKE', 'WMT', 'TMO', 'ABBV', 'MRK', 'LLY',
-            'COST', 'ORCL', 'ACN', 'MDT', 'DHR', 'TXN', 'NEE', 'HON', 'UNP',
-            'PM', 'IBM', 'QCOM', 'LOW', 'LIN', 'AMD', 'GS', 'SBUX', 'CAT'
-        ]
-        
-        # Background tasks
-        self.background_tasks = []
-        
-    def setup_logging(self):
-        """Setup structured logging"""
-        self.logger = get_logger()
-        self.logger = self.logger.bind(service=self.service_name)
-        
-    async def initialize(self):
-        """Initialize async components"""
+        logger.info("Creating database connection pool...")
         try:
-            # Initialize database pool
-            database_url = os.getenv('DATABASE_URL')
-            if database_url:
-                self.db_pool = await asyncpg.create_pool(
-                    database_url,
-                    min_size=2,
-                    max_size=10,
-                    command_timeout=60
-                )
-            
-            # Initialize Redis
-            redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
-            self.redis_client = await redis.from_url(
-                redis_url,
-                decode_responses=True
+            db_pool = await asyncpg.create_pool(
+                database_url,
+                min_size=2,
+                max_size=10,
+                max_queries=50000,
+                max_inactive_connection_lifetime=300,
+                command_timeout=60
             )
             
-            # Test connections
-            db_connected = await self.test_db_connection()
-            redis_connected = await self.test_redis_connection()
-            
-            # Load configuration
-            await self._load_configuration()
-            
-            self.logger.info("Scanner service initialized",
-                           database_connected=db_connected,
-                           redis_connected=redis_connected,
-                           blacklisted=len(self.blacklisted_symbols))
-            
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Failed to initialize scanner: {str(e)}")
-            return False
-    
-    async def test_db_connection(self) -> bool:
-        """Test database connection"""
-        if not self.db_pool:
-            return False
-        try:
-            async with self.db_pool.acquire() as conn:
+            # Test connection
+            async with db_pool.acquire() as conn:
                 await conn.fetchval("SELECT 1")
-            return True
-        except:
-            return False
-    
-    async def test_redis_connection(self) -> bool:
-        """Test Redis connection"""
-        if not self.redis_client:
-            return False
-        try:
-            await self.redis_client.ping()
-            return True
-        except:
-            return False
-    
-    async def cleanup(self):
-        """Clean up resources"""
-        # Cancel background tasks
-        for task in self.background_tasks:
-            task.cancel()
-        
-        # Close connections
-        if self.redis_client:
-            await self.redis_client.aclose()
-        
-        if self.db_pool:
-            await self.db_pool.close()
-    
-    async def _load_configuration(self):
-        """Load saved configuration from cache"""
-        try:
-            # Load blacklisted symbols
-            blacklist = await self.redis_client.smembers("scanner:blacklisted_symbols")
-            self.blacklisted_symbols = set(blacklist) if blacklist else set()
-            
-            # Load dynamic thresholds
-            thresholds = await self.redis_client.get("scanner:dynamic_thresholds")
-            if thresholds:
-                self.dynamic_thresholds.update(json.loads(thresholds))
                 
+            logger.info("Database pool created successfully")
         except Exception as e:
-            self.logger.warning(f"Failed to load configuration: {str(e)}")
-    
-    async def scan_market(self, mode: str = 'normal', force: bool = False) -> Dict:
-        """Perform market scan for trading candidates"""
-        try:
-            # Check scan frequency limit
-            if not force:
-                last_scan = await self.redis_client.get("scanner:last_scan_time")
-                if last_scan:
-                    last_scan_time = datetime.fromisoformat(last_scan)
-                    time_since = (datetime.now() - last_scan_time).total_seconds()
-                    if time_since < self.scanner_config['scan_frequency']:
-                        return {
-                            'success': False,
-                            'error': f"Scan frequency limit. Next scan in {self.scanner_config['scan_frequency'] - time_since:.0f} seconds"
-                        }
-            
-            # Start scan
-            scan_id = f"scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            scan_start = datetime.now()
-            
-            self.logger.info(f"Starting market scan {scan_id} in {mode} mode")
-            
-            # Get symbols to scan
-            symbols = await self._get_scan_universe(mode)
-            
-            # Filter blacklisted
-            symbols = [s for s in symbols if s not in self.blacklisted_symbols]
-            
-            # Scan symbols
-            candidates = await self._scan_symbols(symbols[:self.scanner_config['initial_universe_size']])
-            
-            # Sort by score
-            candidates.sort(key=lambda x: x['score'], reverse=True)
-            
-            # Limit to final selection size
-            candidates = candidates[:self.scanner_config['final_selection_size']]
-            
-            # Add metadata
-            for i, candidate in enumerate(candidates):
-                candidate['rank'] = i + 1
-                candidate['scan_id'] = scan_id
-            
-            # Calculate scan duration
-            scan_duration = (datetime.now() - scan_start).total_seconds()
-            
-            # Save scan results
-            scan_result = {
-                'scan_id': scan_id,
-                'timestamp': scan_start.isoformat(),
-                'mode': mode,
-                'symbols_scanned': len(symbols),
-                'candidates_found': len(candidates),
-                'duration': scan_duration,
-                'candidates': candidates
-            }
-            
-            # Persist to database
-            if self.db_pool:
-                await self._persist_scan_results(scan_result)
-            
-            # Cache results
-            await self.redis_client.setex(
-                "scanner:latest_candidates",
-                self.scanner_config['scan_frequency'],
-                json.dumps(candidates)
-            )
-            await self.redis_client.set(
-                "scanner:last_scan_time",
-                datetime.now().isoformat()
-            )
-            
-            # Add to history
-            self.scan_history.append(scan_result)
-            if len(self.scan_history) > self.max_history_size:
-                self.scan_history.pop(0)
-            
-            self.logger.info(f"Scan completed: {len(candidates)} candidates found")
-            
-            return {
-                'success': True,
-                'scan_id': scan_id,
-                'candidates': candidates,
-                'summary': {
-                    'symbols_scanned': len(symbols),
-                    'candidates_found': len(candidates),
-                    'duration': scan_duration
-                }
-            }
-            
-        except Exception as e:
-            self.logger.error(f"Market scan failed: {str(e)}")
-            return {
-                'success': False,
-                'error': str(e)
-            }
-    
-    async def _get_scan_universe(self, mode: str) -> List[str]:
-        """Get universe of symbols to scan"""
-        # Start with default universe
-        universe = list(self.default_universe)
-        
-        # Add more symbols based on mode
-        if mode == 'aggressive':
-            # Add more volatile stocks
-            universe.extend(['GME', 'AMC', 'BB', 'PLTR', 'SOFI', 'RIVN', 'LCID'])
-        elif mode == 'conservative':
-            # Focus on large caps only
-            universe = universe[:30]
-        
-        return universe
-    
-    async def _scan_symbols(self, symbols: List[str]) -> List[Dict]:
-        """Scan multiple symbols and score them"""
-        candidates = []
-        
-        # Process symbols in batches
-        batch_size = 10
-        for i in range(0, len(symbols), batch_size):
-            batch = symbols[i:i + batch_size]
-            
-            # Process batch in parallel
-            tasks = [self._scan_symbol(symbol) for symbol in batch]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            # Filter valid results
-            for result in results:
-                if isinstance(result, dict) and result.get('score', 0) >= self.dynamic_thresholds['min_momentum_score']:
-                    candidates.append(result)
-        
-        return candidates
-    
-    async def _scan_symbol(self, symbol: str) -> Optional[Dict]:
-        """Scan individual symbol"""
-        try:
-            # Get market data (simplified for now)
-            data = await self._get_symbol_data(symbol)
-            if not data:
-                return None
-            
-            # Calculate scores
-            momentum_score = self._calculate_momentum_score(data)
-            volume_score = self._calculate_volume_score(data)
-            
-            # Overall score
-            overall_score = (momentum_score * 0.6 + volume_score * 0.4)
-            
-            return {
-                'symbol': symbol,
-                'score': round(overall_score, 2),
-                'momentum_score': round(momentum_score, 2),
-                'volume_score': round(volume_score, 2),
-                'price': data.get('price'),
-                'price_change_pct': data.get('price_change_pct'),
-                'volume': data.get('volume'),
-                'scan_time': datetime.now().isoformat()
-            }
-            
-        except Exception as e:
-            self.logger.debug(f"Error scanning {symbol}: {str(e)}")
-            return None
-    
-    async def _get_symbol_data(self, symbol: str) -> Optional[Dict]:
-        """Get market data for symbol (simplified)"""
-        try:
-            # Check cache first
-            cache_key = f"scanner:symbol_data:{symbol}"
-            cached = await self.redis_client.get(cache_key)
-            if cached:
-                return json.loads(cached)
-            
-            # For now, return mock data
-            # In production, would fetch from Alpaca or yfinance
-            import random
-            data = {
-                'symbol': symbol,
-                'price': round(random.uniform(10, 500), 2),
-                'price_change_pct': round(random.uniform(-5, 5), 2),
-                'volume': random.randint(1000000, 50000000),
-                'avg_volume': random.randint(1000000, 30000000)
-            }
-            
-            # Cache for 1 minute
-            await self.redis_client.setex(cache_key, 60, json.dumps(data))
-            
-            return data
-            
-        except Exception as e:
-            return None
-    
-    def _calculate_momentum_score(self, data: Dict) -> float:
-        """Calculate momentum score (0-100)"""
-        score = 50  # Base score
-        
-        # Price change component
-        price_change = abs(data.get('price_change_pct', 0))
-        if price_change > 3:
-            score += 30
-        elif price_change > 2:
-            score += 20
-        elif price_change > 1:
-            score += 10
-        
-        return min(score, 100)
-    
-    def _calculate_volume_score(self, data: Dict) -> float:
-        """Calculate volume score (0-100)"""
-        score = 0
-        
-        # Volume component
-        volume = data.get('volume', 0)
-        avg_volume = data.get('avg_volume', 1)
-        
-        rel_volume = volume / avg_volume if avg_volume > 0 else 1
-        
-        if rel_volume > 2:
-            score = 80
-        elif rel_volume > 1.5:
-            score = 60
-        elif rel_volume > 1:
-            score = 40
-        else:
-            score = 20
-        
-        return min(score, 100)
-    
-    async def _persist_scan_results(self, scan_result: Dict):
-        """Save scan results to database"""
-        if not self.db_pool:
-            return
-        
-        try:
-            async with self.db_pool.acquire() as conn:
-                # Insert scan record
-                await conn.execute("""
-                    INSERT INTO scanner_history (scan_id, timestamp, mode, symbols_scanned, 
-                                                candidates_found, duration, metadata)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7)
-                    ON CONFLICT (scan_id) DO NOTHING
-                """, scan_result['scan_id'], scan_result['timestamp'], scan_result['mode'],
-                    scan_result['symbols_scanned'], scan_result['candidates_found'],
-                    scan_result['duration'], json.dumps(scan_result))
-        except Exception as e:
-            self.logger.error(f"Failed to persist scan results: {str(e)}")
-    
-    async def get_candidates(self) -> List[Dict]:
-        """Get current trading candidates"""
-        try:
-            cached = await self.redis_client.get("scanner:latest_candidates")
-            if cached:
-                return json.loads(cached)
-            return []
-        except:
-            return []
-    
-    async def health_check(self) -> Dict:
-        """Service health check"""
-        try:
-            db_ok = await self.test_db_connection()
-            redis_ok = await self.test_redis_connection()
-            
-            # Get last scan time
-            last_scan = await self.redis_client.get("scanner:last_scan_time")
-            
-            return {
-                'status': 'healthy' if (db_ok and redis_ok) else 'degraded',
-                'service': 'scanner',
-                'version': '4.1.0',
-                'database': 'connected' if db_ok else 'disconnected',
-                'redis': 'connected' if redis_ok else 'disconnected',
-                'last_scan': last_scan,
-                'blacklisted_symbols': len(self.blacklisted_symbols)
-            }
-        except Exception as e:
-            return {
-                'status': 'unhealthy',
-                'error': str(e)
-            }
+            logger.error(f"Failed to create database pool: {str(e)}")
+            raise
+    return db_pool
 
-# FastAPI endpoints
+# ========== STARTUP/SHUTDOWN ==========
+
 @app.on_event("startup")
-async def startup_event():
-    """Initialize scanner on FastAPI startup"""
-    global scanner_instance
-    scanner_instance = ScannerService()
-    success = await scanner_instance.initialize()
-    if success:
-        app.state.scanner = scanner_instance
-        print(f"Scanner service started on port {scanner_instance.port}")
-    else:
-        print("Failed to initialize scanner service")
+async def startup():
+    """Initialize connections on startup"""
+    global redis_client, alpaca_client
+    
+    try:
+        # Initialize database pool
+        await get_db_pool()
+        
+        # Initialize Redis
+        redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+        redis_client = redis.from_url(redis_url, decode_responses=True)
+        await redis_client.ping()
+        logger.info("Redis connected")
+        
+        # Initialize Alpaca
+        alpaca_client = tradeapi.REST(
+            key_id=os.getenv('ALPACA_API_KEY'),
+            secret_key=os.getenv('ALPACA_SECRET_KEY'),
+            base_url=os.getenv('ALPACA_BASE_URL', 'https://paper-api.alpaca.markets')
+        )
+        logger.info("Alpaca client initialized")
+        
+        # Ensure database tables exist
+        await ensure_tables_exist()
+        
+        logger.info("Scanner service started successfully")
+        
+    except Exception as e:
+        logger.error(f"Failed to start scanner service: {str(e)}")
+        raise
 
 @app.on_event("shutdown")
-async def shutdown_event():
-    """Cleanup on shutdown"""
-    if scanner_instance:
-        await scanner_instance.cleanup()
+async def shutdown():
+    """Clean up connections"""
+    if db_pool:
+        await db_pool.close()
+        logger.info("Database pool closed")
+    
+    if redis_client:
+        await redis_client.close()
+        logger.info("Redis connection closed")
+
+# ========== REST API ENDPOINTS ==========
 
 @app.get("/health")
-async def health():
+async def health_check():
     """Health check endpoint"""
-    if scanner_instance:
-        return await scanner_instance.health_check()
-    return {"status": "unhealthy", "error": "Scanner not initialized"}
+    try:
+        health_status = {
+            "status": "healthy",
+            "service": "scanner",
+            "version": "5.0.0",
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Check database
+        try:
+            async with db_pool.acquire() as conn:
+                await conn.fetchval("SELECT 1")
+            health_status["database"] = "connected"
+        except:
+            health_status["database"] = "disconnected"
+            health_status["status"] = "degraded"
+        
+        # Check Redis
+        try:
+            await redis_client.ping()
+            health_status["redis"] = "connected"
+        except:
+            health_status["redis"] = "disconnected"
+            health_status["status"] = "degraded"
+        
+        # Check Alpaca
+        try:
+            account = alpaca_client.get_account()
+            health_status["alpaca"] = "connected"
+            health_status["market_status"] = "open" if account.trading_blocked == False else "closed"
+        except:
+            health_status["alpaca"] = "disconnected"
+            health_status["status"] = "degraded"
+        
+        status_code = 200 if health_status["status"] == "healthy" else 503
+        return JSONResponse(content=health_status, status_code=status_code)
+        
+    except Exception as e:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unhealthy", "error": str(e)}
+        )
 
-@app.post("/scan")
-async def trigger_scan(mode: str = "normal", force: bool = False):
-    """Trigger a market scan"""
-    if not scanner_instance:
-        raise HTTPException(status_code=503, detail="Scanner not initialized")
-    
-    result = await scanner_instance.scan_market(mode=mode, force=force)
-    if not result.get('success'):
-        raise HTTPException(status_code=400, detail=result.get('error'))
-    
-    return result
+@app.post("/api/v1/scan", response_model=ScanResult)
+async def perform_scan(request: ScanRequest, background_tasks: BackgroundTasks):
+    """Perform market scan and persist results"""
+    try:
+        scan_id = f"scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        scan_timestamp = datetime.now()
+        
+        logger.info(f"Starting scan {scan_id} in {request.mode} mode")
+        
+        # Get market movers
+        symbols = await get_market_movers(request.mode)
+        
+        # Score candidates
+        candidates = []
+        for symbol in symbols[:request.max_candidates]:
+            score = await score_candidate(symbol, request.news_context)
+            if score['composite_score'] > 50:  # Minimum threshold
+                candidates.append(score)
+        
+        # Sort by composite score
+        candidates.sort(key=lambda x: x['composite_score'], reverse=True)
+        candidates = candidates[:request.max_candidates]
+        
+        # Prepare scan result
+        scan_result = {
+            'scan_id': scan_id,
+            'timestamp': scan_timestamp,
+            'mode': request.mode,
+            'candidates': candidates,
+            'metadata': {
+                'symbols_scanned': len(symbols),
+                'candidates_found': len(candidates)
+            }
+        }
+        
+        # Persist in background
+        background_tasks.add_task(persist_scan_results, scan_result)
+        
+        # Cache latest candidates
+        await redis_client.setex(
+            "scanner:latest_candidates",
+            SCAN_CONFIG['scan_frequency'],
+            json.dumps(candidates)
+        )
+        
+        logger.info(f"Scan {scan_id} completed: {len(candidates)} candidates found")
+        
+        return ScanResult(
+            scan_id=scan_id,
+            timestamp=scan_timestamp.isoformat(),
+            mode=request.mode,
+            candidates_found=len(candidates),
+            candidates=candidates,
+            metadata=scan_result['metadata']
+        )
+        
+    except Exception as e:
+        logger.error(f"Scan failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/candidates")
-async def get_candidates():
+@app.get("/api/v1/candidates")
+async def get_current_candidates():
     """Get current trading candidates"""
-    if not scanner_instance:
-        raise HTTPException(status_code=503, detail="Scanner not initialized")
-    
-    candidates = await scanner_instance.get_candidates()
-    return {"candidates": candidates, "count": len(candidates)}
+    try:
+        # Try cache first
+        cached = await redis_client.get("scanner:latest_candidates")
+        if cached:
+            return json.loads(cached)
+        
+        # Get from database
+        async with db_pool.acquire() as conn:
+            results = await conn.fetch("""
+                SELECT DISTINCT ON (symbol) 
+                    symbol, momentum_score, volume_score, 
+                    catalyst_score, composite_score, metadata
+                FROM scan_results
+                WHERE scan_time > NOW() - INTERVAL '1 hour'
+                ORDER BY symbol, scan_time DESC
+                LIMIT 5
+            """)
+            
+            candidates = [dict(r) for r in results]
+            return candidates
+            
+    except Exception as e:
+        logger.error(f"Failed to get candidates: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/status")
-async def get_status():
-    """Get scanner status"""
-    if not scanner_instance:
-        return {"status": "not_initialized"}
-    
-    return {
-        "status": "running",
-        "blacklisted_symbols": len(scanner_instance.blacklisted_symbols),
-        "scan_history_size": len(scanner_instance.scan_history),
-        "thresholds": scanner_instance.dynamic_thresholds,
-        "config": scanner_instance.scanner_config
-    }
+@app.get("/api/v1/scan/{scan_id}")
+async def get_scan_results(scan_id: str):
+    """Get specific scan results"""
+    try:
+        async with db_pool.acquire() as conn:
+            results = await conn.fetch("""
+                SELECT * FROM scan_results
+                WHERE scan_id = $1
+                ORDER BY composite_score DESC
+            """, scan_id)
+            
+            if not results:
+                raise HTTPException(status_code=404, detail="Scan not found")
+            
+            return [dict(r) for r in results]
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/blacklist/{symbol}")
-async def blacklist_symbol(symbol: str, action: str = "add"):
-    """Add or remove symbol from blacklist"""
-    if not scanner_instance:
-        raise HTTPException(status_code=503, detail="Scanner not initialized")
-    
-    symbol = symbol.upper()
-    
-    if action == "add":
-        scanner_instance.blacklisted_symbols.add(symbol)
-        await scanner_instance.redis_client.sadd("scanner:blacklisted_symbols", symbol)
-    elif action == "remove":
-        scanner_instance.blacklisted_symbols.discard(symbol)
-        await scanner_instance.redis_client.srem("scanner:blacklisted_symbols", symbol)
-    
-    return {
-        "symbol": symbol,
-        "action": action,
-        "blacklisted": symbol in scanner_instance.blacklisted_symbols
-    }
+# ========== SCANNING LOGIC ==========
 
-# Main entry point
+async def get_market_movers(mode: str) -> List[str]:
+    """Get market movers from Alpaca"""
+    try:
+        if mode == "premarket":
+            # Get pre-market movers
+            assets = alpaca_client.list_assets(status='active', asset_class='us_equity')
+            return [a.symbol for a in assets if a.tradable][:SCAN_CONFIG['initial_universe_size']]
+        else:
+            # Get most active stocks
+            bars = alpaca_client.get_bars(
+                ['SPY'],  # Use SPY as proxy for market
+                timeframe='1Day',
+                limit=1
+            )
+            
+            # Get top volume stocks (simplified)
+            assets = alpaca_client.list_assets(status='active', asset_class='us_equity')
+            tradable = [a.symbol for a in assets if a.tradable and a.marginable]
+            return tradable[:SCAN_CONFIG['initial_universe_size']]
+            
+    except Exception as e:
+        logger.error(f"Failed to get market movers: {str(e)}")
+        return []
+
+async def score_candidate(symbol: str, news_context: Optional[Dict]) -> Dict:
+    """Score a candidate based on multiple factors"""
+    try:
+        # Get latest price data
+        bars = alpaca_client.get_bars(
+            symbol,
+            timeframe='1Day',
+            limit=20
+        )
+        
+        if not bars:
+            return {'symbol': symbol, 'composite_score': 0}
+        
+        latest_bar = bars[-1]
+        
+        # Calculate momentum score (simplified)
+        price_change = ((latest_bar.c - bars[0].c) / bars[0].c) * 100
+        momentum_score = min(100, max(0, 50 + (price_change * 2)))
+        
+        # Calculate volume score
+        avg_volume = sum(b.v for b in bars[:-1]) / len(bars[:-1])
+        volume_ratio = latest_bar.v / avg_volume if avg_volume > 0 else 1
+        volume_score = min(100, volume_ratio * 30)
+        
+        # Calculate catalyst score (simplified - would integrate news)
+        catalyst_score = 50  # Default
+        if news_context and symbol in news_context:
+            catalyst_score = 75
+        
+        # Composite score
+        composite_score = (momentum_score * 0.3 + 
+                         volume_score * 0.3 + 
+                         catalyst_score * 0.4)
+        
+        return {
+            'symbol': symbol,
+            'momentum_score': round(momentum_score, 2),
+            'volume_score': round(volume_score, 2),
+            'catalyst_score': round(catalyst_score, 2),
+            'composite_score': round(composite_score, 2),
+            'price': float(latest_bar.c),
+            'volume': int(latest_bar.v),
+            'price_change_pct': round(price_change, 2)
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to score {symbol}: {str(e)}")
+        return {'symbol': symbol, 'composite_score': 0}
+
+# ========== DATABASE OPERATIONS ==========
+
+async def ensure_tables_exist():
+    """Ensure required database tables exist"""
+    try:
+        async with db_pool.acquire() as conn:
+            # Create tables if they don't exist
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS trading_cycles (
+                    cycle_id SERIAL PRIMARY KEY,
+                    scan_type VARCHAR(50),
+                    status VARCHAR(20),
+                    start_time TIMESTAMP DEFAULT NOW(),
+                    end_time TIMESTAMP
+                )
+            """)
+            
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS scan_results (
+                    scan_id VARCHAR(50),
+                    cycle_id INTEGER,
+                    symbol VARCHAR(10),
+                    scan_time TIMESTAMP,
+                    momentum_score FLOAT DEFAULT 0,
+                    volume_score FLOAT DEFAULT 0,
+                    catalyst_score FLOAT DEFAULT 0,
+                    composite_score FLOAT DEFAULT 0,
+                    metadata JSONB,
+                    PRIMARY KEY (scan_id, symbol)
+                )
+            """)
+            
+            logger.info("Database tables verified")
+            
+    except Exception as e:
+        logger.error(f"Failed to create tables: {str(e)}")
+        raise
+
+async def persist_scan_results(scan_data: Dict):
+    """Persist scan results to database"""
+    try:
+        async with db_pool.acquire() as conn:
+            # Get or create trading cycle
+            cycle_id = await conn.fetchval("""
+                SELECT cycle_id FROM trading_cycles 
+                WHERE status = 'active' 
+                ORDER BY start_time DESC LIMIT 1
+            """)
+            
+            if not cycle_id:
+                cycle_id = await conn.fetchval("""
+                    INSERT INTO trading_cycles (scan_type, status)
+                    VALUES ('market_scan', 'active')
+                    RETURNING cycle_id
+                """)
+                logger.info(f"Created new trading cycle: {cycle_id}")
+            
+            # Insert scan results
+            saved_count = 0
+            for candidate in scan_data.get('candidates', []):
+                try:
+                    await conn.execute("""
+                        INSERT INTO scan_results (
+                            scan_id, cycle_id, symbol, scan_time,
+                            momentum_score, volume_score, catalyst_score,
+                            composite_score, metadata
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                        ON CONFLICT (scan_id, symbol) DO UPDATE SET
+                            momentum_score = EXCLUDED.momentum_score,
+                            volume_score = EXCLUDED.volume_score,
+                            catalyst_score = EXCLUDED.catalyst_score,
+                            composite_score = EXCLUDED.composite_score,
+                            metadata = EXCLUDED.metadata
+                    """, 
+                        scan_data['scan_id'],
+                        cycle_id,
+                        candidate['symbol'],
+                        scan_data['timestamp'],
+                        candidate.get('momentum_score', 0),
+                        candidate.get('volume_score', 0),
+                        candidate.get('catalyst_score', 0),
+                        candidate.get('composite_score', 0),
+                        json.dumps(candidate)
+                    )
+                    saved_count += 1
+                except Exception as e:
+                    logger.error(f"Failed to save candidate {candidate['symbol']}: {str(e)}")
+            
+            logger.info(f"✅ Persisted {saved_count}/{len(scan_data.get('candidates', []))} scan results to database")
+            
+    except Exception as e:
+        logger.error(f"❌ Failed to persist scan results: {str(e)}")
+
+# ========== MAIN ==========
+
 if __name__ == "__main__":
-    # Print startup banner
-    print("============================================================")
-    print("🎩 Catalyst Trading System - Scanner Service v4.1")
-    print("============================================================")
-    print("Status: Starting...")
-    print(f"Port: {os.getenv('SERVICE_PORT', '5001')}")
-    print("Protocol: REST API")
-    print("============================================================")
+    port = int(os.getenv('SERVICE_PORT', '5001'))
     
-    # Run the service
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=int(os.getenv('SERVICE_PORT', '5001')),
-        log_level=os.getenv('LOG_LEVEL', 'info').lower()
+        port=port,
+        log_level="info",
+        access_log=True
     )
