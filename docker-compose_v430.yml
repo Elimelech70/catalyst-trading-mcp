@@ -1,23 +1,24 @@
 # Name of Application: Catalyst Trading System
 # Name of file: docker-compose.yml
-# Version: 5.0.0
+# Version: 4.3.0
 # Last Updated: 2025-09-19
-# Purpose: Docker Compose configuration with REST API architecture
+# Purpose: Docker Compose configuration with Database MCP Service
 
 # REVISION HISTORY:
-# v5.0.0 (2025-09-19) - Migrated to REST API architecture
-# - REMOVED database-service (MCP pattern was incorrect)
-# - Services now connect directly to DigitalOcean PostgreSQL
-# - Removed DATABASE_SERVICE_URL from all services
-# - Services will use REST APIs for inter-service communication
-# v4.3.0 (2025-09-19) - Added Database MCP Service (now removed - wrong pattern)
+# v4.3.0 (2025-09-19) - Added Database MCP Service
+# - Added database-service on port 5010
+# - Updated all services to depend on database-service
+# - Services now use MCP Database Client instead of direct connections
 # v4.2.0 (2025-09-13) - Fixed to use DigitalOcean Managed PostgreSQL
+# - Removed local PostgreSQL container
+# - All services use cloud DATABASE_URL from .env
+# - Fixed environment variable references
+# - Proper health checks and dependencies
 # v4.1.0 (2025-08-31) - Previous version with local PostgreSQL
 
 # Description of Service:
 # Complete docker-compose setup for Catalyst Trading MCP system
-# using DigitalOcean Managed PostgreSQL with direct connections
-# MCP is used ONLY for orchestration/Claude interface
+# using DigitalOcean Managed PostgreSQL cloud service with MCP Database Service layer
 
 version: '3.8'
 
@@ -38,7 +39,47 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # Orchestration Service (MCP-enabled for Claude)
+  # Database MCP Service (NEW - v4.3.0)
+  database-service:
+    build:
+      context: .
+      dockerfile: services/database/Dockerfile
+    container_name: catalyst-database-service
+    env_file: 
+      - ./config/.env
+    environment:
+      # DigitalOcean Managed PostgreSQL connection
+      DATABASE_URL: ${DATABASE_URL}
+      DATABASE_HOST: ${DATABASE_HOST}
+      DATABASE_PORT: ${DATABASE_PORT:-25060}
+      DATABASE_NAME: ${DATABASE_NAME:-catalyst_trading}
+      DATABASE_USER: ${DATABASE_USER}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD}
+      DATABASE_SSLMODE: ${DATABASE_SSLMODE:-require}
+      # Redis cache connection
+      REDIS_URL: redis://:${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}@redis:6379/0
+      # Service configuration
+      SERVICE_NAME: database-mcp-service
+      SERVICE_PORT: 5010
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PYTHONUNBUFFERED: 1
+      MCP_TRANSPORT: websocket
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "5010:5010"
+    volumes:
+      - ./logs/database:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import asyncio, aiohttp; asyncio.run(aiohttp.ClientSession().get('http://localhost:5010/health'))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Orchestration Service (v41)
   orchestration:
     build:
       context: ./services/orchestration
@@ -47,8 +88,9 @@ services:
     env_file: 
       - ./config/.env
     environment:
-      # Direct database connection
+      # Database connection via MCP Service
       DATABASE_URL: ${DATABASE_URL}
+      DATABASE_SERVICE_URL: ws://database-service:5010
       REDIS_URL: redis://:${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}@redis:6379/0
       MCP_MODE: production
       SERVICE_PORT: 5000
@@ -56,6 +98,8 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       redis:
+        condition: service_healthy
+      database-service:
         condition: service_healthy
     ports:
       - "5000:5000"
@@ -68,7 +112,7 @@ services:
       timeout: 10s
       retries: 3
 
-  # Scanner Service (REST API)
+  # Scanner Service (v41)
   scanner:
     build:
       context: ./services/scanner
@@ -78,6 +122,7 @@ services:
       - ./config/.env
     environment:
       DATABASE_URL: ${DATABASE_URL}
+      DATABASE_SERVICE_URL: ws://database-service:5010
       REDIS_URL: redis://:${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}@redis:6379/0
       NEWS_URL: http://news:5008
       ALPACA_API_KEY: ${ALPACA_API_KEY}
@@ -90,6 +135,8 @@ services:
       FINAL_SELECTION_SIZE: ${FINAL_SELECTION_SIZE:-5}
     depends_on:
       redis:
+        condition: service_healthy
+      database-service:
         condition: service_healthy
       orchestration:
         condition: service_started
@@ -104,7 +151,7 @@ services:
       timeout: 10s
       retries: 3
 
-  # News Intelligence Service (REST API)
+  # News Scanner Service
   news:
     build:
       context: ./services/news
@@ -114,6 +161,7 @@ services:
       - ./config/.env    
     environment:
       DATABASE_URL: ${DATABASE_URL}
+      DATABASE_SERVICE_URL: ws://database-service:5010
       REDIS_URL: redis://:${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}@redis:6379/0
       SERVICE_PORT: 5008
       NEWS_API_KEY: ${NEWS_API_KEY}
@@ -121,6 +169,8 @@ services:
       FINNHUB_API_KEY: ${FINNHUB_API_KEY}
     depends_on:
       redis:
+        condition: service_healthy
+      database-service:
         condition: service_healthy
     ports:
       - "5008:5008"
@@ -133,7 +183,7 @@ services:
       timeout: 10s
       retries: 3
 
-  # Pattern Detection Service (REST API)
+  # Pattern Detection Service
   pattern:
     build:
       context: ./services/pattern
@@ -143,10 +193,13 @@ services:
       - ./config/.env
     environment:
       DATABASE_URL: ${DATABASE_URL}
+      DATABASE_SERVICE_URL: ws://database-service:5010
       REDIS_URL: redis://:${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}@redis:6379/0
       SERVICE_PORT: 5002
     depends_on:
       redis:
+        condition: service_healthy
+      database-service:
         condition: service_healthy
     ports:
       - "5002:5002"
@@ -159,7 +212,7 @@ services:
       timeout: 10s
       retries: 3
 
-  # Risk Manager Service (REST API)
+  # Risk Manager Service
   risk-manager:
     build:
       context: ./services/risk-manager
@@ -169,6 +222,7 @@ services:
       - ./config/.env
     environment:
       DATABASE_URL: ${DATABASE_URL}
+      DATABASE_SERVICE_URL: ws://database-service:5010
       REDIS_URL: redis://:${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}@redis:6379/0
       SERVICE_PORT: 5004
       MAX_DAILY_LOSS: ${MAX_DAILY_LOSS:-2000}
@@ -177,6 +231,8 @@ services:
       RISK_FREE_RATE: ${RISK_FREE_RATE:-0.05}
     depends_on:
       redis:
+        condition: service_healthy
+      database-service:
         condition: service_healthy
     ports:
       - "5004:5004"
@@ -189,7 +245,7 @@ services:
       timeout: 10s
       retries: 3
 
-  # Trading Execution Service (REST API)
+  # Trading Service
   trading:
     build:
       context: ./services/trading
@@ -199,6 +255,7 @@ services:
       - ./config/.env
     environment:
       DATABASE_URL: ${DATABASE_URL}
+      DATABASE_SERVICE_URL: ws://database-service:5010
       REDIS_URL: redis://:${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}@redis:6379/0
       ALPACA_API_KEY: ${ALPACA_API_KEY}
       ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY}
@@ -212,6 +269,8 @@ services:
       TAKE_PROFIT_PCT: ${TAKE_PROFIT_PCT:-4.0}
     depends_on:
       redis:
+        condition: service_healthy
+      database-service:
         condition: service_healthy
       risk-manager:
         condition: service_started
@@ -228,7 +287,7 @@ services:
       timeout: 10s
       retries: 3
 
-  # Reporting & Analytics Service (REST API)
+  # Reporting Service
   reporting:
     build:
       context: ./services/reporting
@@ -238,6 +297,7 @@ services:
       - ./config/.env
     environment:
       DATABASE_URL: ${DATABASE_URL}
+      DATABASE_SERVICE_URL: ws://database-service:5010
       REDIS_URL: redis://:${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}@redis:6379/0
       SERVICE_PORT: 5009
       SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL}
@@ -245,6 +305,8 @@ services:
       DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL}
     depends_on:
       redis:
+        condition: service_healthy
+      database-service:
         condition: service_healthy
     ports:
       - "5009:5009"
@@ -258,7 +320,7 @@ services:
       timeout: 10s
       retries: 3
 
-# Volumes (only Redis data, PostgreSQL is cloud-managed)
+# Volumes (only Redis data, no PostgreSQL as it's cloud-managed)
 volumes:
   redis_data:
     driver: local
