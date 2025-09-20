@@ -1,0 +1,21 @@
+# Technical Indicators Configuration
+indicators:
+  rsi:
+    period: 14
+    overbought: 70
+    oversold: 30
+    
+  macd:
+    fast: 12
+    slow: 26
+    signal: 9
+    
+  bollinger_bands:
+    period: 20
+    std_dev: 2.0
+    
+  moving_averages:
+    sma_short: 20
+    sma_long: 50
+    ema_short: 9
+    ema_long: 21

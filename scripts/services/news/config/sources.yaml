@@ -1,0 +1,22 @@
+# News Sources Configuration
+sources:
+  alpha_vantage:
+    enabled: true
+    api_key_env: "ALPHA_VANTAGE_API_KEY"
+    rate_limit: 5  # calls per minute
+    
+  finnhub:
+    enabled: true
+    api_key_env: "FINNHUB_API_KEY"
+    rate_limit: 30  # calls per minute
+    
+  newsapi:
+    enabled: true
+    api_key_env: "NEWS_API_KEY"
+    rate_limit: 100  # calls per day
+
+sentiment:
+  providers:
+    - "textblob"
+    - "vader"
+  threshold: 0.1

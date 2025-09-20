@@ -1,0 +1,21 @@
+# Risk Management Parameters
+risk_limits:
+  max_daily_loss: 2000.0
+  max_position_risk: 0.02  # 2% per trade
+  max_portfolio_risk: 0.05  # 5% total
+  max_positions: 5
+  position_size_multiplier: 1.0
+
+stop_loss:
+  atr_multiple: 2.0
+  min_stop_distance: 0.01  # 1%
+  max_stop_distance: 0.05  # 5%
+
+take_profit:
+  atr_multiple: 3.0
+  risk_reward_ratio: 1.5
+
+emergency:
+  daily_loss_threshold: 0.8  # 80% of max daily loss
+  consecutive_losses: 3
+  drawdown_threshold: 0.1  # 10%
