@@ -2,17 +2,11 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: scanner-service.py
-Version: 5.1.0
-Last Updated: 2025-09-20
-Purpose: Scanner service with REST API and direct database persistence following v4.1 schema
+Version: 5.0.0
+Last Updated: 2025-09-19
+Purpose: Scanner service with REST API and direct database persistence
 
 REVISION HISTORY:
-v5.1.0 (2025-09-20) - Schema-compliant database operations
-- Updated persist_scan_results() to follow database-schema-mcp-v41.md exactly
-- Updated score_candidate() to return all required schema fields
-- Proper cycle_id generation as VARCHAR(20)
-- All trading_cycles and scan_results fields per schema
-
 v5.0.0 (2025-09-19) - REST API architecture with direct DB
 - Removed MCP database client dependency
 - Direct asyncpg connection to DigitalOcean PostgreSQL
@@ -23,7 +17,6 @@ v5.0.0 (2025-09-19) - REST API architecture with direct DB
 Description of Service:
 Market scanner that identifies trading opportunities using REST API
 for inter-service communication and direct database persistence.
-Schema-compliant operations for v4.1 database structure.
 """
 
 import os
@@ -50,8 +43,8 @@ logger = logging.getLogger("scanner-service")
 # FastAPI app
 app = FastAPI(
     title="Scanner Service",
-    version="5.1.0",
-    description="Market scanner with REST API - Schema v4.1 compliant"
+    version="5.0.0",
+    description="Market scanner with REST API"
 )
 
 # Global connections
@@ -177,7 +170,7 @@ async def health_check():
         health_status = {
             "status": "healthy",
             "service": "scanner",
-            "version": "5.1.0",
+            "version": "5.0.0",
             "timestamp": datetime.now().isoformat()
         }
         
@@ -230,21 +223,14 @@ async def perform_scan(request: ScanRequest, background_tasks: BackgroundTasks):
         
         # Score candidates
         candidates = []
-        rank = 1
-        for symbol in symbols[:request.max_candidates * 2]:  # Get more to filter
+        for symbol in symbols[:request.max_candidates]:
             score = await score_candidate(symbol, request.news_context)
             if score['composite_score'] > 50:  # Minimum threshold
-                score['rank'] = rank
                 candidates.append(score)
-                rank += 1
         
         # Sort by composite score
         candidates.sort(key=lambda x: x['composite_score'], reverse=True)
         candidates = candidates[:request.max_candidates]
-        
-        # Update ranks after sorting
-        for i, candidate in enumerate(candidates):
-            candidate['rank'] = i + 1
         
         # Prepare scan result
         scan_result = {
@@ -296,9 +282,8 @@ async def get_current_candidates():
         async with db_pool.acquire() as conn:
             results = await conn.fetch("""
                 SELECT DISTINCT ON (symbol) 
-                    symbol, momentum_score, catalyst_score, 
-                    pattern_score, technical_score, composite_score, 
-                    price, volume, change_percent
+                    symbol, momentum_score, volume_score, 
+                    catalyst_score, composite_score, metadata
                 FROM scan_results
                 WHERE scan_time > NOW() - INTERVAL '1 hour'
                 ORDER BY symbol, scan_time DESC
@@ -358,10 +343,7 @@ async def get_market_movers(mode: str) -> List[str]:
         return []
 
 async def score_candidate(symbol: str, news_context: Optional[Dict]) -> Dict:
-    """
-    Score a candidate following the v4.1 schema scoring fields
-    Returns all score fields required by the schema
-    """
+    """Score a candidate based on multiple factors"""
     try:
         # Get latest price data
         bars = alpaca_client.get_bars(
@@ -370,73 +352,44 @@ async def score_candidate(symbol: str, news_context: Optional[Dict]) -> Dict:
             limit=20
         )
         
-        if not bars or len(bars) == 0:
-            return {
-                'symbol': symbol,
-                'price': 0,
-                'volume': 0,
-                'momentum_score': 0,
-                'catalyst_score': 0,
-                'pattern_score': 0,
-                'technical_score': 0,
-                'composite_score': 0  # Will be calculated by DB as GENERATED column
-            }
+        if not bars:
+            return {'symbol': symbol, 'composite_score': 0}
         
         latest_bar = bars[-1]
         
-        # Calculate momentum score (0-100 scale as per schema)
+        # Calculate momentum score (simplified)
         price_change = ((latest_bar.c - bars[0].c) / bars[0].c) * 100
         momentum_score = min(100, max(0, 50 + (price_change * 2)))
         
-        # Calculate volume score for technical_score
-        avg_volume = sum(b.v for b in bars[:-1]) / len(bars[:-1]) if len(bars) > 1 else 1
+        # Calculate volume score
+        avg_volume = sum(b.v for b in bars[:-1]) / len(bars[:-1])
         volume_ratio = latest_bar.v / avg_volume if avg_volume > 0 else 1
-        technical_score = min(100, volume_ratio * 30)
+        volume_score = min(100, volume_ratio * 30)
         
-        # Calculate catalyst score (with news if available)
-        catalyst_score = 50  # Base score
+        # Calculate catalyst score (simplified - would integrate news)
+        catalyst_score = 50  # Default
         if news_context and symbol in news_context:
-            catalyst_score = min(100, catalyst_score + 25)  # Boost for news
+            catalyst_score = 75
         
-        # Pattern score (simplified - would integrate pattern detection service)
-        pattern_score = 50  # Default, would come from pattern service
-        
-        # Composite score will be calculated by database GENERATED column
-        # total_score = (momentum * 0.3 + catalyst * 0.3 + pattern * 0.2 + technical * 0.2)
-        composite_score = (
-            momentum_score * 0.3 + 
-            catalyst_score * 0.3 + 
-            pattern_score * 0.2 + 
-            technical_score * 0.2
-        )
+        # Composite score
+        composite_score = (momentum_score * 0.3 + 
+                         volume_score * 0.3 + 
+                         catalyst_score * 0.4)
         
         return {
             'symbol': symbol,
+            'momentum_score': round(momentum_score, 2),
+            'volume_score': round(volume_score, 2),
+            'catalyst_score': round(catalyst_score, 2),
+            'composite_score': round(composite_score, 2),
             'price': float(latest_bar.c),
             'volume': int(latest_bar.v),
-            'price_change_pct': round(price_change, 2),
-            'momentum_score': round(momentum_score, 2),
-            'catalyst_score': round(catalyst_score, 2),
-            'pattern_score': round(pattern_score, 2),
-            'technical_score': round(technical_score, 2),
-            'composite_score': round(composite_score, 2),
-            'catalysts': [],  # Would be populated from news service
-            'patterns': [],   # Would be populated from pattern service
-            'signals': {}     # Would be populated from technical service
+            'price_change_pct': round(price_change, 2)
         }
         
     except Exception as e:
         logger.error(f"Failed to score {symbol}: {str(e)}")
-        return {
-            'symbol': symbol,
-            'price': 0,
-            'volume': 0,
-            'momentum_score': 0,
-            'catalyst_score': 0,
-            'pattern_score': 0,
-            'technical_score': 0,
-            'composite_score': 0
-        }
+        return {'symbol': symbol, 'composite_score': 0}
 
 # ========== DATABASE OPERATIONS ==========
 
@@ -447,42 +400,26 @@ async def ensure_tables_exist():
             # Create tables if they don't exist
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS trading_cycles (
-                    cycle_id VARCHAR(20) PRIMARY KEY,
-                    mode VARCHAR(20) DEFAULT 'normal',
-                    status VARCHAR(20) DEFAULT 'active',
-                    scan_frequency INTEGER DEFAULT 300,
-                    max_positions INTEGER DEFAULT 5,
-                    risk_level DECIMAL(3,2) DEFAULT 0.5,
-                    started_at TIMESTAMPTZ DEFAULT NOW(),
-                    ended_at TIMESTAMPTZ,
-                    updated_at TIMESTAMPTZ DEFAULT NOW(),
-                    metrics JSONB DEFAULT '{}'
+                    cycle_id SERIAL PRIMARY KEY,
+                    scan_type VARCHAR(50),
+                    status VARCHAR(20),
+                    start_time TIMESTAMP DEFAULT NOW(),
+                    end_time TIMESTAMP
                 )
             """)
             
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS scan_results (
-                    scan_time TIMESTAMPTZ NOT NULL,
-                    scan_id VARCHAR(50) NOT NULL,
-                    symbol VARCHAR(10) NOT NULL,
-                    cycle_id VARCHAR(20),
-                    price DECIMAL(10,2) DEFAULT 0,
-                    volume BIGINT DEFAULT 0,
-                    change_percent DECIMAL(6,2) DEFAULT 0,
-                    momentum_score DECIMAL(5,2) DEFAULT 0,
-                    catalyst_score DECIMAL(5,2) DEFAULT 0,
-                    pattern_score DECIMAL(5,2) DEFAULT 0,
-                    technical_score DECIMAL(5,2) DEFAULT 0,
-                    composite_score DECIMAL(5,2) GENERATED ALWAYS AS (
-                        (momentum_score * 0.3 + catalyst_score * 0.3 + 
-                         pattern_score * 0.2 + technical_score * 0.2)
-                    ) STORED,
-                    catalysts JSONB DEFAULT '[]',
-                    patterns JSONB DEFAULT '[]',
-                    signals JSONB DEFAULT '{}',
-                    is_selected BOOLEAN DEFAULT FALSE,
-                    selection_rank INTEGER,
-                    PRIMARY KEY (scan_time, scan_id, symbol)
+                    scan_id VARCHAR(50),
+                    cycle_id INTEGER,
+                    symbol VARCHAR(10),
+                    scan_time TIMESTAMP,
+                    momentum_score FLOAT DEFAULT 0,
+                    volume_score FLOAT DEFAULT 0,
+                    catalyst_score FLOAT DEFAULT 0,
+                    composite_score FLOAT DEFAULT 0,
+                    metadata JSONB,
+                    PRIMARY KEY (scan_id, symbol)
                 )
             """)
             
@@ -493,85 +430,50 @@ async def ensure_tables_exist():
         raise
 
 async def persist_scan_results(scan_data: Dict):
-    """
-    Persist scan results following the v4.1 database schema exactly
-    """
+    """Persist scan results to database"""
     try:
         async with db_pool.acquire() as conn:
-            # Check for active cycle or create one - following schema exactly
+            # Get or create trading cycle
             cycle_id = await conn.fetchval("""
                 SELECT cycle_id FROM trading_cycles 
                 WHERE status = 'active' 
-                ORDER BY started_at DESC 
-                LIMIT 1
+                ORDER BY start_time DESC LIMIT 1
             """)
             
             if not cycle_id:
-                # Generate cycle_id as VARCHAR(20) - format: YYYYMMDD-NNN
-                today = datetime.now().strftime('%Y%m%d')
-                count = await conn.fetchval("""
-                    SELECT COUNT(*) FROM trading_cycles 
-                    WHERE cycle_id LIKE $1
-                """, f"{today}-%")
-                
-                cycle_id = f"{today}-{count+1:03d}"
-                
-                # Insert with all required fields from schema
-                await conn.execute("""
-                    INSERT INTO trading_cycles (
-                        cycle_id, mode, status, scan_frequency, 
-                        max_positions, risk_level, started_at
-                    ) VALUES ($1, $2, $3, $4, $5, $6, NOW())
-                """, 
-                    cycle_id,           # VARCHAR(20)
-                    'normal',           # mode: normal/aggressive/conservative
-                    'active',           # status: active
-                    300,                # scan_frequency: 300 seconds (5 min)
-                    5,                  # max_positions: 5
-                    0.5                 # risk_level: 0.5 (50%)
-                )
-                logger.info(f"Created trading cycle: {cycle_id}")
+                cycle_id = await conn.fetchval("""
+                    INSERT INTO trading_cycles (scan_type, status)
+                    VALUES ('market_scan', 'active')
+                    RETURNING cycle_id
+                """)
+                logger.info(f"Created new trading cycle: {cycle_id}")
             
-            # Insert scan results with correct schema fields
+            # Insert scan results
             saved_count = 0
             for candidate in scan_data.get('candidates', []):
                 try:
-                    # Ensure we have all required fields
                     await conn.execute("""
                         INSERT INTO scan_results (
                             scan_id, cycle_id, symbol, scan_time,
-                            price, volume, change_percent,
-                            momentum_score, catalyst_score, pattern_score, technical_score,
-                            catalysts, patterns, signals,
-                            is_selected, selection_rank
-                        ) VALUES (
-                            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 
-                            $12, $13, $14, $15, $16
-                        )
-                        ON CONFLICT (scan_time, scan_id, symbol) DO UPDATE SET
-                            price = EXCLUDED.price,
-                            volume = EXCLUDED.volume,
+                            momentum_score, volume_score, catalyst_score,
+                            composite_score, metadata
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                        ON CONFLICT (scan_id, symbol) DO UPDATE SET
                             momentum_score = EXCLUDED.momentum_score,
+                            volume_score = EXCLUDED.volume_score,
                             catalyst_score = EXCLUDED.catalyst_score,
-                            pattern_score = EXCLUDED.pattern_score,
-                            technical_score = EXCLUDED.technical_score
+                            composite_score = EXCLUDED.composite_score,
+                            metadata = EXCLUDED.metadata
                     """, 
-                        scan_data['scan_id'],                    # scan_id VARCHAR(50)
-                        cycle_id,                                 # cycle_id VARCHAR(20)
-                        candidate['symbol'],                      # symbol VARCHAR(10)
-                        scan_data['timestamp'],                   # scan_time TIMESTAMPTZ
-                        float(candidate.get('price', 0)),        # price DECIMAL(10,2)
-                        int(candidate.get('volume', 0)),         # volume BIGINT
-                        float(candidate.get('price_change_pct', 0)), # change_percent
-                        float(candidate.get('momentum_score', 0)),    # momentum_score
-                        float(candidate.get('catalyst_score', 0)),    # catalyst_score
-                        float(candidate.get('pattern_score', 0)),     # pattern_score
-                        float(candidate.get('technical_score', 0)),   # technical_score
-                        json.dumps(candidate.get('catalysts', [])),   # catalysts JSONB
-                        json.dumps(candidate.get('patterns', [])),    # patterns JSONB
-                        json.dumps(candidate.get('signals', {})),     # signals JSONB
-                        candidate.get('rank', 0) <= 5,           # is_selected (top 5)
-                        candidate.get('rank', 0)                 # selection_rank
+                        scan_data['scan_id'],
+                        cycle_id,
+                        candidate['symbol'],
+                        scan_data['timestamp'],
+                        candidate.get('momentum_score', 0),
+                        candidate.get('volume_score', 0),
+                        candidate.get('catalyst_score', 0),
+                        candidate.get('composite_score', 0),
+                        json.dumps(candidate)
                     )
                     saved_count += 1
                 except Exception as e:
@@ -579,22 +481,8 @@ async def persist_scan_results(scan_data: Dict):
             
             logger.info(f"✅ Persisted {saved_count}/{len(scan_data.get('candidates', []))} scan results to database")
             
-            # Update cycle metrics as per schema
-            if saved_count > 0:
-                await conn.execute("""
-                    UPDATE trading_cycles 
-                    SET metrics = jsonb_build_object(
-                        'last_scan_time', to_char(NOW(), 'YYYY-MM-DD HH24:MI:SS'),
-                        'total_scans', COALESCE((metrics->>'total_scans')::int, 0) + 1,
-                        'candidates_found', $2
-                    ),
-                    updated_at = NOW()
-                    WHERE cycle_id = $1
-                """, cycle_id, saved_count)
-            
     except Exception as e:
         logger.error(f"❌ Failed to persist scan results: {str(e)}")
-        raise
 
 # ========== MAIN ==========
 
