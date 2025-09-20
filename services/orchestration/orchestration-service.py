@@ -95,8 +95,12 @@ async def init_handler():
     logger.info("Initializing orchestration service...")
     
     try:
-        # Initialize database connection pool
+        # Initialize database connection pool with optimized settings
         state.db_pool = await asyncpg.create_pool(
             os.getenv("DATABASE_URL"),
-            min_size=5,
-            max_size=20,
+            min_size=2,        # Reduced from 5
+            max_size=5,        # Reduced from 20
+            command_timeout=30, # Reduced from 60
+            max_inactive_connection_lifetime=300,
+            statement_cache_size=0  # Save memory
+        )
