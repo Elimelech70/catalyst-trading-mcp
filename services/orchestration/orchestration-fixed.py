@@ -13,21 +13,6 @@ v4.2.0 (2025-09-20) - EMERGENCY FIX
 - Working MCP implementation
 - Basic functionality restored
 
-v4.2.0 (2025-09-20) - Risk Management Integration
-- Added Risk Manager service integration (port 5004)
-- Enhanced with 8-service architecture per v4.2 specs
-- Mandatory risk validation for all trades
-- Risk-first trading flow implementation
-- Enhanced safety protocols and emergency stops
-- Updated resource hierarchies for risk management
-
-v4.1.0 (2025-09-20) - Corrected MCP implementation
-- Fixed to use actual FastMCP from Anthropic SDK
-- Removed non-existent MCPServer references
-- Added proper hierarchical URI structure
-- Implemented Context parameters correctly
-- Added proper error handling with McpError
-
 Description of Service:
 Clean, working orchestration service for MCP integration with Claude Desktop.
 Provides basic trading system coordination and monitoring.
@@ -326,8 +311,9 @@ async def trigger_market_scan(ctx: Context, mode: str = "normal") -> Dict:
             "max_candidates": 5
         }
         
+        # Use correct API endpoint: /api/v1/scan
         async with state.http_session.post(
-            f"{SERVICE_URLS['scanner']}/scan",
+            f"{SERVICE_URLS['scanner']}/api/v1/scan",
             json=scan_data,
             timeout=aiohttp.ClientTimeout(total=30)
         ) as resp:
@@ -336,6 +322,8 @@ async def trigger_market_scan(ctx: Context, mode: str = "normal") -> Dict:
                 return {
                     "success": True,
                     "scan_completed": True,
+                    "candidates_found": result.get("candidates_found", 0),
+                    "scan_id": result.get("scan_id"),
                     "result": result
                 }
             else:
@@ -347,6 +335,93 @@ async def trigger_market_scan(ctx: Context, mode: str = "normal") -> Dict:
                 
     except Exception as e:
         logger.error(f"Failed to trigger market scan: {e}")
+        return {"success": False, "error": str(e)}
+
+@mcp.tool()
+async def analyze_symbol(ctx: Context, symbol: str) -> Dict:
+    """Analyze a symbol with pattern and technical analysis
+    
+    Args:
+        symbol: Stock symbol to analyze (e.g., 'AAPL')
+    
+    Returns:
+        Combined analysis results
+    """
+    try:
+        if not state.http_session:
+            return {"success": False, "error": "HTTP session not available"}
+        
+        results = {"symbol": symbol}
+        
+        # Pattern analysis using correct endpoint
+        try:
+            async with state.http_session.post(
+                f"{SERVICE_URLS['pattern']}/api/v1/analyze?symbol={symbol}",
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
+                if resp.status == 200:
+                    pattern_data = await resp.json()
+                    results["pattern_analysis"] = pattern_data
+                else:
+                    results["pattern_analysis"] = {"error": f"HTTP {resp.status}"}
+        except Exception as e:
+            results["pattern_analysis"] = {"error": str(e)}
+        
+        # Technical analysis using correct endpoint
+        try:
+            async with state.http_session.post(
+                f"{SERVICE_URLS['technical']}/api/v1/analyze/simple?symbol={symbol}",
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
+                if resp.status == 200:
+                    technical_data = await resp.json()
+                    results["technical_analysis"] = technical_data
+                else:
+                    results["technical_analysis"] = {"error": f"HTTP {resp.status}"}
+        except Exception as e:
+            results["technical_analysis"] = {"error": str(e)}
+        
+        return {
+            "success": True,
+            "analysis": results
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to analyze symbol {symbol}: {e}")
+        return {"success": False, "error": str(e)}
+
+@mcp.tool()
+async def get_trading_positions(ctx: Context) -> Dict:
+    """Get current trading positions
+    
+    Returns:
+        List of active positions
+    """
+    try:
+        if not state.http_session:
+            return {"success": False, "error": "HTTP session not available"}
+        
+        # Use correct API endpoint: /api/v1/positions
+        async with state.http_session.get(
+            f"{SERVICE_URLS['trading']}/api/v1/positions",
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as resp:
+            if resp.status == 200:
+                positions = await resp.json()
+                return {
+                    "success": True,
+                    "positions": positions,
+                    "position_count": len(positions) if isinstance(positions, list) else 0
+                }
+            else:
+                error_text = await resp.text()
+                return {
+                    "success": False,
+                    "error": f"Trading service returned {resp.status}: {error_text}"
+                }
+                
+    except Exception as e:
+        logger.error(f"Failed to get trading positions: {e}")
         return {"success": False, "error": str(e)}
 
 @mcp.tool()
