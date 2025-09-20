@@ -44,6 +44,9 @@ import json
 from mcp.server.fastmcp import FastMCP, Context
 from mcp.types import McpError
 
+# Import optimized database manager
+from services.shared.optimized_database import OptimizedDatabaseManager
+
 # Initialize FastMCP server (NOT MCPServer!)
 mcp = FastMCP("orchestration")
 logger = structlog.get_logger()
@@ -70,7 +73,7 @@ class SystemState:
         self.current_cycle: Optional[TradingCycle] = None
         self.workflow_state: WorkflowState = WorkflowState.IDLE
         self.service_health: Dict = {}
-        self.db_pool: Optional[asyncpg.Pool] = None
+        self.db_manager: Optional[OptimizedDatabaseManager] = None
         self.redis_client: Optional[redis.Redis] = None
         self.http_session: Optional[aiohttp.ClientSession] = None
 
