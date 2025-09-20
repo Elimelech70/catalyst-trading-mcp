@@ -47,8 +47,7 @@ async def check_all_connections() -> Dict[str, Any]:
     """Check total database connections across all services"""
     try:
         # Use a minimal connection to check database status
-        url = "postgresql://doadmin:AVNS_COlEfvzem_NMElg7hd_@catalyst-trading-db-do-user-23488393-0.l.db.ondigitalocean.com:25060/catalyst_trading?sslmode=require"
-
+        url = os.getenv("DATABASE_URL")
         if not url:
             return {"error": "DATABASE_URL not set"}
         
