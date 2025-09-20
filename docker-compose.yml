@@ -4,7 +4,12 @@
 # Last Updated: 2025-09-19
 # Purpose: Docker Compose configuration with REST API architecture
 
+
 # REVISION HISTORY:
+# v5.1.0 (2025-09-20)
+# Added Technical Analysis Service
+# Was missing
+# 
 # v5.0.0 (2025-09-19) - Migrated to REST API architecture
 # - REMOVED database-service (MCP pattern was incorrect)
 # - Services now connect directly to DigitalOcean PostgreSQL
@@ -45,7 +50,7 @@ services:
       dockerfile: Dockerfile
     container_name: catalyst-orchestration
     env_file: 
-      - ./config/.env
+      - ./.env
     environment:
       # Direct database connection
       DATABASE_URL: ${DATABASE_URL}
@@ -75,7 +80,7 @@ services:
       dockerfile: Dockerfile
     container_name: catalyst-scanner
     env_file: 
-      - ./config/.env
+      - ./.env
     environment:
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: redis://:${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}@redis:6379/0
@@ -111,7 +116,7 @@ services:
       dockerfile: Dockerfile
     container_name: catalyst-news
     env_file: 
-      - ./config/.env    
+      - ./.env
     environment:
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: redis://:${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}@redis:6379/0
@@ -140,7 +145,7 @@ services:
       dockerfile: Dockerfile
     container_name: catalyst-pattern
     env_file: 
-      - ./config/.env
+      - ./.env
     environment:
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: redis://:${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}@redis:6379/0
@@ -166,7 +171,7 @@ services:
       dockerfile: Dockerfile
     container_name: catalyst-risk
     env_file: 
-      - ./config/.env
+      - ./.env
     environment:
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: redis://:${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}@redis:6379/0
@@ -189,6 +194,57 @@ services:
       timeout: 10s
       retries: 3
 
+  # Technical Analysis Service (REST API)
+  technical:
+    build:
+      context: ./services/technical
+      dockerfile: Dockerfile
+    container_name: catalyst-technical
+    env_file: 
+      - ./.env  # Fixed path (was ./config/.env)
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}@redis:6379/0
+      SERVICE_PORT: 5003
+      # Technical Analysis Configuration
+      RSI_PERIOD: ${RSI_PERIOD:-14}
+      MACD_FAST: ${MACD_FAST:-12}
+      MACD_SLOW: ${MACD_SLOW:-26}
+      MACD_SIGNAL: ${MACD_SIGNAL:-9}
+      BB_PERIOD: ${BB_PERIOD:-20}
+      BB_STD: ${BB_STD:-2.0}
+      SMA_SHORT: ${SMA_SHORT:-20}
+      SMA_LONG: ${SMA_LONG:-50}
+      EMA_SHORT: ${EMA_SHORT:-9}
+      EMA_LONG: ${EMA_LONG:-21}
+      ATR_PERIOD: ${ATR_PERIOD:-14}
+      ADX_PERIOD: ${ADX_PERIOD:-14}
+      STOCH_PERIOD: ${STOCH_PERIOD:-14}
+      # Signal Thresholds
+      RSI_OVERSOLD: ${RSI_OVERSOLD:-30}
+      RSI_OVERBOUGHT: ${RSI_OVERBOUGHT:-70}
+      MACD_THRESHOLD: ${MACD_THRESHOLD:-0}
+      ADX_TREND_STRENGTH: ${ADX_TREND_STRENGTH:-25}
+      TECHNICAL_LOOKBACK_PERIODS: ${TECHNICAL_LOOKBACK_PERIODS:-100}
+      # Risk Parameters
+      STOP_LOSS_ATR: ${STOP_LOSS_ATR:-2.0}
+      TAKE_PROFIT_ATR: ${TAKE_PROFIT_ATR:-3.0}
+    depends_on:
+      redis:
+        condition: service_healthy
+      orchestration:
+        condition: service_started
+    ports:
+      - "5003:5003"
+    volumes:
+      - ./logs/technical:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   # Trading Execution Service (REST API)
   trading:
     build:
@@ -196,7 +252,7 @@ services:
       dockerfile: Dockerfile
     container_name: catalyst-trading
     env_file: 
-      - ./config/.env
+      - ./.env
     environment:
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: redis://:${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}@redis:6379/0
@@ -235,7 +291,7 @@ services:
       dockerfile: Dockerfile
     container_name: catalyst-reporting
     env_file: 
-      - ./config/.env
+      - ./.env
     environment:
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: redis://:${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}@redis:6379/0
