@@ -1,6 +1,6 @@
 # Name of Application: Catalyst Trading System
 # Name of file: docker-compose.yml
-# Version: 5.0.0
+# Version: 5.0.1
 # Last Updated: 2025-09-19
 # Purpose: Docker Compose configuration with REST API architecture
 
