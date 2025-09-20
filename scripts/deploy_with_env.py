@@ -128,7 +128,7 @@ def main():
         # Run deployment script with inherited environment
         result = subprocess.run([
             sys.executable, 
-            './scripts/deploy_v42_services.py'
+            './scripts/deploy_v42_simple.py'
         ], env=os.environ.copy())
         
         sys.exit(result.returncode)
