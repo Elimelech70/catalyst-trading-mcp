@@ -12,7 +12,7 @@ import logging
 import smtplib
 import json
 from datetime import datetime, timedelta
-from email.mime.text import MimeText
+from email.mime.text import MIMEText 
 from typing import Dict, List
 import os
 import psutil
@@ -113,7 +113,7 @@ class SystemMonitor:
                 return
 
         try:
-            msg = MimeText(message)
+            msg = MIMEText (message)
             msg['Subject'] = f"[CATALYST ALERT] {subject}"
             msg['From'] = os.getenv('SMTP_FROM', 'catalyst@localhost')
             msg['To'] = alert_email
