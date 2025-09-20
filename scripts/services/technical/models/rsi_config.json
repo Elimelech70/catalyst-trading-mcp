@@ -1,0 +1,11 @@
+{
+  "indicator": "rsi",
+  "version": "1.0.0",
+  "parameters": {
+    "period": 14,
+    "overbought": 70,
+    "oversold": 30,
+    "smoothing": "sma"
+  },
+  "created_at": "2025-09-20T00:00:00Z"
+}

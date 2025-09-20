@@ -1,0 +1,8 @@
+{
+  "chart_type": "line",
+  "title": "Profit & Loss",
+  "x_axis": "time",
+  "y_axis": "pnl",
+  "data_source": "trading_metrics",
+  "refresh_interval": 60
+}

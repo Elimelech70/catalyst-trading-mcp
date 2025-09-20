@@ -1,0 +1,11 @@
+{
+  "chart_type": "gauge",
+  "title": "Risk Score",
+  "data_source": "risk_metrics",
+  "thresholds": {
+    "low": 30,
+    "medium": 70,
+    "high": 90
+  },
+  "refresh_interval": 30
+}
