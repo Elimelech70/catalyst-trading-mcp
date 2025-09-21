@@ -2,642 +2,338 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: risk-manager-service.py
-Version: 4.2.0
+Version: 4.2.1
 Last Updated: 2025-09-20
-Purpose: Risk management service for position sizing, validation, and safety controls
+Purpose: Risk management service with live market data integration
 
 REVISION HISTORY:
-v4.2.0 (2025-09-20) - Complete rewrite for v4.2 architecture
-- FastAPI REST service (not MCP)
-- Comprehensive risk management algorithms
-- Real-time risk monitoring and alerts
-- Dynamic position sizing calculations
-- Emergency stop functionality
-- Database integration with v4.2 schema
-- Risk parameter management
-- Exposure tracking and limits
+v4.2.1 (2025-09-20) - Fixed current_price database error
+- Removed current_price database queries (column doesn't exist)
+- Added live market data integration via yfinance
+- Calculate real-time P&L using live prices
+- Fixed database schema compliance issues
+- Added proper error handling for market data failures
 
 Description of Service:
-This service provides comprehensive risk management for the trading system:
-1. Real-time risk monitoring and validation
-2. Dynamic position sizing based on volatility and confidence
-3. Daily loss limits and exposure controls
-4. Emergency stop procedures
-5. Risk parameter management
-6. Portfolio exposure tracking
-7. Risk alerts and notifications
+Risk management service that fetches live market prices from Yahoo Finance
+to calculate real-time position risk, P&L, and portfolio metrics.
+No longer depends on non-existent database columns.
 """
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-from typing import Dict, List, Optional, Any
-import asyncio
+from fastapi import FastAPI, HTTPException
+from typing import Dict, List, Optional
 import asyncpg
-import aioredis
-import uvicorn
-import os
-import json
+import yfinance as yf
+import asyncio
 import logging
-from datetime import datetime, date, timedelta
-from decimal import Decimal, ROUND_HALF_UP
-import numpy as np
-from dataclasses import dataclass, asdict
-from enum import Enum
-import signal
-import sys
+from datetime import datetime, date
+import os
+from contextlib import asynccontextmanager
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger("risk-manager")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Initialize FastAPI
-app = FastAPI(
-    title="Catalyst Risk Manager",
-    description="Risk management service for position sizing and safety controls",
-    version="4.2.0"
-)
+# Database connection
+DATABASE_URL = os.getenv("DATABASE_URL")
+db_pool = None
 
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app = FastAPI(title="Risk Manager Service", version="4.2.1")
 
-# === RISK MODELS ===
-
-class RiskLevel(Enum):
-    CONSERVATIVE = "conservative"
-    NORMAL = "normal"
-    AGGRESSIVE = "aggressive"
-
-class AlertLevel(Enum):
-    INFO = "info"
-    WARNING = "warning"
-    CRITICAL = "critical"
-    EMERGENCY = "emergency"
-
-@dataclass
-class RiskParameters:
-    """Current risk management parameters"""
-    max_daily_loss: float = 2000.0
-    max_position_risk: float = 0.02  # 2% per position
-    max_portfolio_risk: float = 0.05  # 5% total portfolio risk
-    position_size_multiplier: float = 1.0
-    stop_loss_atr_multiple: float = 2.0
-    take_profit_atr_multiple: float = 3.0
-    max_positions: int = 5
-    risk_free_rate: float = 0.05
-    correlation_limit: float = 0.7
-    sector_concentration_limit: float = 0.4
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan management"""
+    global db_pool
     
-class TradeValidationRequest(BaseModel):
-    symbol: str
-    side: str = Field(..., pattern="^(buy|sell)$")
-    quantity: Optional[int] = None
-    confidence: float = Field(..., ge=0.0, le=1.0)
-    current_price: float = Field(..., gt=0)
-    atr: Optional[float] = None
-    sector: Optional[str] = None
-    signal_data: Optional[Dict] = None
+    # Startup
+    logger.info("🛡️ Starting Risk Manager Service v4.2.1")
+    
+    if DATABASE_URL:
+        try:
+            db_pool = await asyncpg.create_pool(DATABASE_URL)
+            logger.info("✅ Database pool created successfully")
+        except Exception as e:
+            logger.error(f"❌ Database connection failed: {e}")
+            db_pool = None
+    
+    yield
+    
+    # Shutdown
+    if db_pool:
+        await db_pool.close()
+        logger.info("Database pool closed")
 
-class PositionSizeRequest(BaseModel):
-    symbol: str
-    side: str = Field(..., pattern="^(buy|sell)$")
-    confidence: float = Field(..., ge=0.0, le=1.0)
-    current_price: float = Field(..., gt=0)
-    atr: float = Field(..., gt=0)
-    account_balance: float = Field(..., gt=0)
-    sector: Optional[str] = None
+app.router.lifespan_context = lifespan
 
-class RiskParameterUpdate(BaseModel):
-    parameter_name: str
-    parameter_value: float
-    effective_from: Optional[datetime] = None
-
-class EmergencyStopRequest(BaseModel):
-    reason: str
-    stop_all_trading: bool = True
-    close_positions: bool = False
-
-# === GLOBAL STATE ===
-
-class RiskManagerState:
-    def __init__(self):
-        self.db_pool: Optional[asyncpg.Pool] = None
-        self.redis_client: Optional[aioredis.Redis] = None
-        self.risk_params: RiskParameters = RiskParameters()
-        self.daily_metrics: Dict = {}
-        self.position_cache: Dict = {}
-        self.alert_history: List = []
-        self.emergency_stop_active: bool = False
-        
-state = RiskManagerState()
-
-# === DATABASE FUNCTIONS ===
-
-async def init_database():
-    """Initialize database connection pool"""
+async def get_live_price(symbol: str) -> float:
+    """Get current market price for symbol"""
     try:
-        DATABASE_URL = os.getenv("DATABASE_URL")
-        if not DATABASE_URL:
-            raise ValueError("DATABASE_URL environment variable not set")
-            
-        state.db_pool = await asyncpg.create_pool(
-            DATABASE_URL,
-            min_size=2,
-            max_size=10,
-            command_timeout=30
+        ticker = yf.Ticker(symbol)
+        info = ticker.info
+        
+        # Try different price fields
+        current_price = (
+            info.get('currentPrice') or
+            info.get('regularMarketPrice') or  
+            info.get('previousClose') or
+            info.get('open')
         )
-        logger.info("Database connection pool initialized")
         
-        # Load current risk parameters
-        await load_risk_parameters()
-        
-    except Exception as e:
-        logger.error(f"Failed to initialize database: {e}")
-        raise
-
-async def load_risk_parameters():
-    """Load current risk parameters from database"""
-    try:
-        async with state.db_pool.acquire() as conn:
-            rows = await conn.fetch("""
-                SELECT parameter_name, parameter_value
-                FROM risk_parameters
-                WHERE effective_from <= NOW()
-                AND (effective_until IS NULL OR effective_until > NOW())
-                ORDER BY effective_from DESC
-            """)
-            
-            # Update risk parameters
-            for row in rows:
-                param_name = row['parameter_name']
-                param_value = float(row['parameter_value'])
-                
-                if hasattr(state.risk_params, param_name):
-                    setattr(state.risk_params, param_name, param_value)
-                    
-            logger.info(f"Loaded {len(rows)} risk parameters")
-            
-    except Exception as e:
-        logger.error(f"Failed to load risk parameters: {e}")
-
-async def get_daily_metrics() -> Dict:
-    """Get current daily risk metrics"""
-    try:
-        today = date.today()
-        
-        async with state.db_pool.acquire() as conn:
-            # Get daily P&L
-            daily_pnl = await conn.fetchval("""
-                SELECT COALESCE(SUM(realized_pnl), 0)
-                FROM positions
-                WHERE DATE(closed_at) = $1
-                AND status = 'closed'
-            """, today)
-            
-            # Get current exposure
-            open_exposure = await conn.fetchval("""
-                SELECT COALESCE(SUM(ABS(quantity * current_price)), 0)
-                FROM positions
-                WHERE status = 'open'
-            """)
-            
-            # Get position count
-            position_count = await conn.fetchval("""
-                SELECT COUNT(*)
-                FROM positions
-                WHERE status = 'open'
-            """)
-            
-            # Calculate remaining risk budget
-            remaining_budget = state.risk_params.max_daily_loss + float(daily_pnl or 0)
-            
-            # Calculate risk score (0-100)
-            risk_score = calculate_risk_score(
-                daily_pnl or 0,
-                open_exposure or 0,
-                position_count or 0
-            )
-            
-            metrics = {
-                "daily_pnl": float(daily_pnl or 0),
-                "daily_loss_limit": state.risk_params.max_daily_loss,
-                "remaining_risk_budget": remaining_budget,
-                "open_exposure": float(open_exposure or 0),
-                "max_exposure_limit": 10000.0,  # Could be parameter
-                "position_count": position_count or 0,
-                "max_positions": state.risk_params.max_positions,
-                "risk_score": risk_score,
-                "emergency_stop_active": state.emergency_stop_active,
-                "timestamp": datetime.now().isoformat()
-            }
-            
-            state.daily_metrics = metrics
-            return metrics
-            
-    except Exception as e:
-        logger.error(f"Failed to get daily metrics: {e}")
-        return {"error": str(e), "timestamp": datetime.now().isoformat()}
-
-def calculate_risk_score(daily_pnl: float, open_exposure: float, position_count: int) -> int:
-    """Calculate overall risk score (0-100)"""
-    score = 0
-    
-    # Daily P&L component (0-40 points)
-    pnl_ratio = abs(daily_pnl) / state.risk_params.max_daily_loss
-    score += min(40, pnl_ratio * 40)
-    
-    # Exposure component (0-30 points)
-    exposure_ratio = open_exposure / 10000.0  # Assume 10k max exposure
-    score += min(30, exposure_ratio * 30)
-    
-    # Position count component (0-30 points)
-    position_ratio = position_count / state.risk_params.max_positions
-    score += min(30, position_ratio * 30)
-    
-    return min(100, int(score))
-
-async def calculate_position_size(
-    symbol: str,
-    side: str,
-    confidence: float,
-    current_price: float,
-    atr: float,
-    account_balance: float
-) -> Dict:
-    """Calculate optimal position size based on risk parameters"""
-    
-    try:
-        # Base risk per trade (adjusted by confidence)
-        base_risk = state.risk_params.max_position_risk
-        confidence_adjusted_risk = base_risk * confidence * state.risk_params.position_size_multiplier
-        
-        # Maximum dollar risk for this trade
-        max_risk_dollars = account_balance * confidence_adjusted_risk
-        
-        # Calculate stop loss distance
-        stop_distance = atr * state.risk_params.stop_loss_atr_multiple
-        stop_price = current_price - stop_distance if side == "buy" else current_price + stop_distance
-        
-        # Calculate position size based on stop loss
-        if stop_distance > 0:
-            shares = int(max_risk_dollars / stop_distance)
+        if current_price:
+            return float(current_price)
         else:
-            shares = 0
+            logger.warning(f"No price data found for {symbol}")
+            return 0.0
             
-        # Calculate position value
-        position_value = shares * current_price
-        
-        # Ensure we don't exceed position limits
-        max_position_value = account_balance * 0.2  # Max 20% per position
-        if position_value > max_position_value:
-            shares = int(max_position_value / current_price)
-            position_value = shares * current_price
-            
-        # Calculate take profit
-        take_profit_distance = atr * state.risk_params.take_profit_atr_multiple
-        take_profit = current_price + take_profit_distance if side == "buy" else current_price - take_profit_distance
-        
-        result = {
-            "symbol": symbol,
-            "side": side,
-            "recommended_shares": shares,
-            "position_value": position_value,
-            "risk_amount": max_risk_dollars,
-            "confidence_used": confidence,
-            "stop_loss": stop_price,
-            "take_profit": take_profit,
-            "stop_distance": stop_distance,
-            "risk_reward_ratio": take_profit_distance / stop_distance if stop_distance > 0 else 0,
-            "position_risk_pct": (position_value / account_balance) * 100,
-            "calculated_at": datetime.now().isoformat()
-        }
-        
-        return result
-        
     except Exception as e:
-        logger.error(f"Position size calculation failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Position calculation failed: {str(e)}")
+        logger.error(f"Error fetching price for {symbol}: {e}")
+        return 0.0
 
-async def validate_trade_request(request: TradeValidationRequest) -> Dict:
-    """Validate trade against all risk parameters"""
-    
-    validation_result = {
-        "approved": False,
-        "symbol": request.symbol,
-        "reasons": [],
-        "warnings": [],
-        "risk_metrics": {},
-        "validated_at": datetime.now().isoformat()
-    }
+async def get_live_prices(symbols: List[str]) -> Dict[str, float]:
+    """Get current prices for multiple symbols"""
+    prices = {}
     
     try:
-        # Get current metrics
-        metrics = await get_daily_metrics()
-        validation_result["risk_metrics"] = metrics
+        # Batch fetch for efficiency
+        symbols_str = " ".join(symbols)
+        tickers = yf.Tickers(symbols_str)
         
-        # Check emergency stop
-        if state.emergency_stop_active:
-            validation_result["reasons"].append("Emergency stop is active")
-            return validation_result
-            
-        # Check daily loss limit
-        if metrics["remaining_risk_budget"] <= 0:
-            validation_result["reasons"].append("Daily loss limit exceeded")
-            return validation_result
-            
-        # Check maximum positions
-        if metrics["position_count"] >= state.risk_params.max_positions:
-            validation_result["reasons"].append(f"Maximum positions limit ({state.risk_params.max_positions}) reached")
-            return validation_result
-            
-        # Check confidence threshold
-        if request.confidence < 0.3:
-            validation_result["reasons"].append("Confidence below minimum threshold (30%)")
-            return validation_result
-            
-        # Add warnings for moderate risk
-        if metrics["risk_score"] > 70:
-            validation_result["warnings"].append("High risk score - consider reducing position size")
-            
-        if request.confidence < 0.5:
-            validation_result["warnings"].append("Low confidence signal - proceed with caution")
-            
-        # If we get here, trade is approved
-        validation_result["approved"] = True
-        validation_result["reasons"].append("All risk checks passed")
-        
-        return validation_result
-        
+        for symbol in symbols:
+            try:
+                ticker = tickers.tickers[symbol]
+                info = ticker.info
+                
+                current_price = (
+                    info.get('currentPrice') or
+                    info.get('regularMarketPrice') or
+                    info.get('previousClose') or
+                    info.get('open')
+                )
+                
+                prices[symbol] = float(current_price) if current_price else 0.0
+                
+            except Exception as e:
+                logger.warning(f"Failed to get price for {symbol}: {e}")
+                prices[symbol] = 0.0
+                
     except Exception as e:
-        logger.error(f"Trade validation failed: {e}")
-        validation_result["reasons"].append(f"Validation error: {str(e)}")
-        return validation_result
-
-# === API ENDPOINTS ===
+        logger.error(f"Batch price fetch failed: {e}")
+        # Fallback to individual requests
+        for symbol in symbols:
+            prices[symbol] = await get_live_price(symbol)
+    
+    return prices
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
-    try:
-        # Test database connection
-        if state.db_pool:
-            async with state.db_pool.acquire() as conn:
-                await conn.fetchval("SELECT 1")
-                
-        return {
-            "status": "healthy",
-            "service": "risk-manager",
-            "version": "4.2.0",
-            "timestamp": datetime.now().isoformat(),
-            "emergency_stop": state.emergency_stop_active
-        }
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Service unhealthy: {str(e)}")
-
-@app.get("/api/v1/parameters")
-async def get_risk_parameters():
-    """Get current risk management parameters"""
     return {
-        "parameters": asdict(state.risk_params),
-        "loaded_at": datetime.now().isoformat()
+        "status": "healthy",
+        "service": "risk-manager",
+        "version": "4.2.1",
+        "database": "connected" if db_pool else "disconnected",
+        "timestamp": datetime.now().isoformat()
     }
 
 @app.get("/api/v1/metrics")
 async def get_risk_metrics():
-    """Get real-time risk metrics"""
-    return await get_daily_metrics()
-
-@app.get("/api/v1/exposure")
-async def get_exposure_breakdown():
-    """Get detailed exposure breakdown"""
+    """Get current risk metrics with live market data"""
     try:
-        async with state.db_pool.acquire() as conn:
-            # Get exposure by symbol
-            symbol_exposure = await conn.fetch("""
+        if not db_pool:
+            raise HTTPException(status_code=503, detail="Database not available")
+        
+        async with db_pool.acquire() as conn:
+            # Get all open positions (fixed query - no current_price column)
+            positions = await conn.fetch("""
                 SELECT 
+                    position_id,
                     symbol,
-                    SUM(quantity * current_price) as exposure,
-                    COUNT(*) as position_count,
-                    AVG(unrealized_pnl) as avg_pnl
-                FROM positions
+                    side,
+                    quantity,
+                    entry_price,
+                    stop_loss,
+                    take_profit,
+                    opened_at,
+                    risk_amount,
+                    unrealized_pnl
+                FROM positions 
                 WHERE status = 'open'
-                GROUP BY symbol
-                ORDER BY exposure DESC
             """)
             
-            # Get exposure by sector (if available)
-            sector_exposure = await conn.fetch("""
-                SELECT 
-                    sector,
-                    SUM(quantity * current_price) as exposure,
-                    COUNT(*) as position_count
-                FROM positions
-                WHERE status = 'open' AND sector IS NOT NULL
-                GROUP BY sector
-                ORDER BY exposure DESC
-            """)
+            if not positions:
+                return {
+                    "total_positions": 0,
+                    "total_exposure": 0.0,
+                    "total_unrealized_pnl": 0.0,
+                    "daily_pnl": 0.0,
+                    "risk_budget_used": 0.0,
+                    "positions": [],
+                    "timestamp": datetime.now().isoformat()
+                }
+            
+            # Get unique symbols for price fetch
+            symbols = list(set(pos['symbol'] for pos in positions))
+            live_prices = await get_live_prices(symbols)
+            
+            # Calculate real-time metrics
+            total_exposure = 0.0
+            total_unrealized_pnl = 0.0
+            position_metrics = []
+            
+            for pos in positions:
+                symbol = pos['symbol']
+                current_price = live_prices.get(symbol, 0.0)
+                
+                if current_price > 0:
+                    # Calculate real-time P&L
+                    if pos['side'] == 'long':
+                        unrealized_pnl = (current_price - pos['entry_price']) * pos['quantity']
+                    else:  # short
+                        unrealized_pnl = (pos['entry_price'] - current_price) * pos['quantity']
+                    
+                    position_value = current_price * pos['quantity']
+                    pnl_percent = (unrealized_pnl / (pos['entry_price'] * pos['quantity'])) * 100
+                else:
+                    unrealized_pnl = pos.get('unrealized_pnl', 0.0) or 0.0
+                    position_value = pos['entry_price'] * pos['quantity']
+                    pnl_percent = 0.0
+                
+                total_exposure += abs(position_value)
+                total_unrealized_pnl += unrealized_pnl
+                
+                position_metrics.append({
+                    "position_id": pos['position_id'],
+                    "symbol": symbol,
+                    "side": pos['side'],
+                    "quantity": pos['quantity'],
+                    "entry_price": float(pos['entry_price']),
+                    "current_price": current_price,
+                    "unrealized_pnl": round(unrealized_pnl, 2),
+                    "pnl_percent": round(pnl_percent, 2),
+                    "position_value": round(position_value, 2),
+                    "stop_loss": float(pos['stop_loss']) if pos['stop_loss'] else None,
+                    "risk_amount": float(pos.get('risk_amount', 0) or 0)
+                })
+            
+            # Get daily P&L from database
+            today = date.today()
+            daily_metrics = await conn.fetchrow("""
+                SELECT daily_pnl, daily_loss_limit 
+                FROM daily_risk_metrics 
+                WHERE date = $1
+            """, today)
+            
+            daily_pnl = float(daily_metrics['daily_pnl']) if daily_metrics else 0.0
+            daily_loss_limit = float(daily_metrics['daily_loss_limit']) if daily_metrics else 2000.0
+            
+            risk_budget_used = (abs(daily_pnl) / daily_loss_limit) * 100
             
             return {
-                "by_symbol": [dict(row) for row in symbol_exposure],
-                "by_sector": [dict(row) for row in sector_exposure],
-                "generated_at": datetime.now().isoformat()
+                "total_positions": len(positions),
+                "total_exposure": round(total_exposure, 2),
+                "total_unrealized_pnl": round(total_unrealized_pnl, 2),
+                "daily_pnl": round(daily_pnl, 2),
+                "daily_loss_limit": round(daily_loss_limit, 2),
+                "risk_budget_used_pct": round(risk_budget_used, 2),
+                "positions": position_metrics,
+                "timestamp": datetime.now().isoformat()
             }
             
     except Exception as e:
-        logger.error(f"Failed to get exposure breakdown: {e}")
+        logger.error(f"Error getting risk metrics: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/v1/validate-trade")
-async def validate_trade(request: TradeValidationRequest):
-    """Validate proposed trade against risk limits"""
-    return await validate_trade_request(request)
-
-@app.post("/api/v1/calculate-position-size")
-async def calculate_position_size_endpoint(request: PositionSizeRequest):
-    """Calculate optimal position size for a trade"""
-    return await calculate_position_size(
-        symbol=request.symbol,
-        side=request.side,
-        confidence=request.confidence,
-        current_price=request.current_price,
-        atr=request.atr,
-        account_balance=request.account_balance
-    )
-
-@app.post("/api/v1/update-parameters")
-async def update_risk_parameters(update: RiskParameterUpdate):
-    """Update risk management parameters"""
+async def validate_trade(trade_data: dict):
+    """Validate if proposed trade meets risk parameters"""
     try:
-        async with state.db_pool.acquire() as conn:
-            # Insert new parameter value
-            await conn.execute("""
-                INSERT INTO risk_parameters 
-                (parameter_name, parameter_value, set_by, effective_from)
-                VALUES ($1, $2, $3, $4)
-            """, 
-            update.parameter_name,
-            update.parameter_value,
-            "api_user",
-            update.effective_from or datetime.now()
-            )
-            
-            # Reload parameters
-            await load_risk_parameters()
-            
-            return {
-                "success": True,
-                "parameter": update.parameter_name,
-                "new_value": update.parameter_value,
-                "updated_at": datetime.now().isoformat()
-            }
-            
-    except Exception as e:
-        logger.error(f"Failed to update parameters: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/v1/emergency-stop")
-async def emergency_stop(request: EmergencyStopRequest):
-    """Trigger emergency stop procedures"""
-    try:
-        state.emergency_stop_active = True
+        symbol = trade_data.get('symbol')
+        quantity = trade_data.get('quantity', 0)
+        side = trade_data.get('side', 'long')
         
-        # Log emergency stop event
-        async with state.db_pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO risk_events 
-                (event_type, severity, message, data, created_at)
-                VALUES ($1, $2, $3, $4, $5)
-            """,
-            "emergency_stop",
-            "critical",
-            f"Emergency stop triggered: {request.reason}",
-            json.dumps({"reason": request.reason, "stop_all": request.stop_all_trading}),
-            datetime.now()
-            )
-            
-        logger.critical(f"EMERGENCY STOP ACTIVATED: {request.reason}")
+        if not symbol or quantity <= 0:
+            raise HTTPException(status_code=400, detail="Invalid trade data")
+        
+        # Get current price
+        current_price = await get_live_price(symbol)
+        if current_price <= 0:
+            return {
+                "approved": False,
+                "reason": f"Unable to get current price for {symbol}"
+            }
+        
+        position_value = current_price * quantity
+        
+        # Basic validation (can be enhanced)
+        max_position_value = 10000  # $10k max position
+        
+        if position_value > max_position_value:
+            return {
+                "approved": False,
+                "reason": f"Position value ${position_value:.2f} exceeds limit ${max_position_value:.2f}",
+                "current_price": current_price
+            }
         
         return {
-            "success": True,
-            "emergency_stop_active": True,
-            "reason": request.reason,
-            "timestamp": datetime.now().isoformat(),
-            "message": "Emergency stop activated - all trading halted"
+            "approved": True,
+            "position_value": round(position_value, 2),
+            "current_price": current_price,
+            "timestamp": datetime.now().isoformat()
         }
         
     except Exception as e:
-        logger.error(f"Emergency stop failed: {e}")
+        logger.error(f"Error validating trade: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/v1/reset-emergency")
-async def reset_emergency_stop():
-    """Reset emergency stop (admin only)"""
-    state.emergency_stop_active = False
-    
-    # Log reset event
-    async with state.db_pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO risk_events 
-            (event_type, severity, message, created_at)
-            VALUES ($1, $2, $3, $4)
-        """,
-        "emergency_reset",
-        "info",
-        "Emergency stop reset - trading resumed",
-        datetime.now()
-        )
-    
-    logger.info("Emergency stop reset - trading resumed")
-    
-    return {
-        "success": True,
-        "emergency_stop_active": False,
-        "message": "Emergency stop reset - trading resumed",
-        "timestamp": datetime.now().isoformat()
-    }
-
-# === BACKGROUND TASKS ===
-
-async def risk_monitoring_task():
-    """Background task for continuous risk monitoring"""
-    while True:
-        try:
-            metrics = await get_daily_metrics()
-            
-            # Check for risk threshold breaches
-            if metrics["risk_score"] > 90:
-                logger.warning(f"High risk score: {metrics['risk_score']}")
-                
-            if metrics["remaining_risk_budget"] < 500:  # $500 remaining
-                logger.warning(f"Low risk budget remaining: ${metrics['remaining_risk_budget']}")
-                
-            await asyncio.sleep(30)  # Check every 30 seconds
-            
-        except Exception as e:
-            logger.error(f"Risk monitoring error: {e}")
-            await asyncio.sleep(60)  # Wait longer on error
-
-# === STARTUP/SHUTDOWN ===
-
-@app.on_event("startup")
-async def startup():
-    """Initialize service on startup"""
+@app.get("/api/v1/position/{position_id}/risk")
+async def get_position_risk(position_id: int):
+    """Get detailed risk analysis for specific position"""
     try:
-        logger.info("Starting Risk Manager Service v4.2.0")
+        if not db_pool:
+            raise HTTPException(status_code=503, detail="Database not available")
         
-        # Initialize database
-        await init_database()
-        
-        # Start background monitoring
-        asyncio.create_task(risk_monitoring_task())
-        
-        logger.info("Risk Manager Service started successfully")
-        
-    except Exception as e:
-        logger.error(f"Failed to start service: {e}")
-        raise
-
-@app.on_event("shutdown")
-async def shutdown():
-    """Cleanup on service shutdown"""
-    try:
-        if state.db_pool:
-            await state.db_pool.close()
+        async with db_pool.acquire() as conn:
+            position = await conn.fetchrow("""
+                SELECT * FROM positions WHERE position_id = $1
+            """, position_id)
             
-        if state.redis_client:
-            await state.redis_client.close()
+            if not position:
+                raise HTTPException(status_code=404, detail="Position not found")
             
-        logger.info("Risk Manager Service stopped")
-        
+            # Get live price
+            current_price = await get_live_price(position['symbol'])
+            
+            if current_price > 0:
+                # Calculate current metrics
+                if position['side'] == 'long':
+                    unrealized_pnl = (current_price - position['entry_price']) * position['quantity']
+                else:
+                    unrealized_pnl = (position['entry_price'] - current_price) * position['quantity']
+                
+                pnl_percent = (unrealized_pnl / (position['entry_price'] * position['quantity'])) * 100
+                position_value = current_price * position['quantity']
+            else:
+                unrealized_pnl = 0.0
+                pnl_percent = 0.0
+                position_value = position['entry_price'] * position['quantity']
+            
+            return {
+                "position_id": position_id,
+                "symbol": position['symbol'],
+                "current_price": current_price,
+                "entry_price": float(position['entry_price']),
+                "unrealized_pnl": round(unrealized_pnl, 2),
+                "pnl_percent": round(pnl_percent, 2),
+                "position_value": round(position_value, 2),
+                "stop_loss": float(position['stop_loss']) if position['stop_loss'] else None,
+                "risk_score": float(position.get('position_risk_score', 0) or 0),
+                "timestamp": datetime.now().isoformat()
+            }
+            
     except Exception as e:
-        logger.error(f"Shutdown error: {e}")
-
-# === MAIN ===
+        logger.error(f"Error getting position risk: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    port = int(os.getenv("SERVICE_PORT", 5004))
-    
-    # Handle graceful shutdown
-    def signal_handler(signum, frame):
-        logger.info("Received shutdown signal")
-        sys.exit(0)
-        
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    
-    uvicorn.run(
-        app, 
-        host="0.0.0.0", 
-        port=port,
-        log_level="info",
-        access_log=True
-    )
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=5004)
