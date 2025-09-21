@@ -1,8 +1,8 @@
 # Name of Application: Catalyst Trading System
 # Name of file: services/reporting/Dockerfile
-# Version: 4.1.0
-# Last Updated: 2025-09-01
-# Purpose: Docker container for Reporting Service v4.1
+# Version: 4.1.1
+# Last Updated: 2025-09-20
+# Purpose: Docker container for Reporting Service - Fixed for single-file implementation
 
 FROM python:3.10-slim
 
@@ -24,14 +24,11 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy service code
+# Copy service code (single file implementation)
 COPY *.py ./
 
-# Copy directories (now they exist)
-COPY templates/ ./templates/
-COPY reports/ ./reports/
-COPY charts/ ./charts/
-COPY static/ ./static/
+# Create placeholder directories that the service might expect
+RUN mkdir -p templates reports charts static logs
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1

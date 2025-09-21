@@ -1,8 +1,8 @@
 # Name of Application: Catalyst Trading System
 # Name of file: services/news/Dockerfile
-# Version: 4.1.0
-# Last Updated: 2025-09-01
-# Purpose: Docker container for News Service v4.1
+# Version: 4.1.1
+# Last Updated: 2025-09-20
+# Purpose: Docker container for News Service - Fixed for single-file implementation
 
 FROM python:3.10-slim
 
@@ -27,13 +27,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Download NLTK data
 RUN python -c "import nltk; nltk.download('vader_lexicon'); nltk.download('punkt')"
 
-# Copy service code
+# Copy service code (single file implementation)
 COPY *.py ./
 
-# Copy directories (now they exist)
-COPY models/ ./models/
-COPY sources/ ./sources/
-COPY processors/ ./processors/
+# Create placeholder directories that the service might expect
+RUN mkdir -p sources models processors logs
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1

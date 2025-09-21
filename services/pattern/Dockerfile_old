@@ -1,8 +1,8 @@
 # Name of Application: Catalyst Trading System
 # Name of file: services/pattern/Dockerfile
-# Version: 4.1.1
-# Last Updated: 2025-09-20
-# Purpose: Docker container for Pattern Service - Fixed for single-file implementation
+# Version: 4.1.0
+# Last Updated: 2025-09-01
+# Purpose: Docker container for Pattern Service v4.1
 
 FROM python:3.10-slim
 
@@ -24,11 +24,12 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy service code (single file implementation)
+# Copy service code
 COPY *.py ./
 
-# Create placeholder directories that the service might expect
-RUN mkdir -p patterns models logs
+# Copy directories (now they exist)
+COPY patterns/ ./patterns/
+COPY models/ ./models/
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1

@@ -1,8 +1,8 @@
 # Name of Application: Catalyst Trading System
 # Name of file: services/technical/Dockerfile
-# Version: 4.1.1
-# Last Updated: 2025-09-20
-# Purpose: Docker container for Technical Service - Fixed for single-file implementation
+# Version: 4.1.0
+# Last Updated: 2025-09-01
+# Purpose: Docker container for Technical Service v4.1
 
 FROM python:3.10-slim
 
@@ -12,23 +12,20 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
-    gfortran \
-    libopenblas-dev \
-    liblapack-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
 COPY requirements.txt .
 
 # Install Python dependencies
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy service code (single file implementation)
+# Copy service code
 COPY *.py ./
 
-# Create placeholder directories that the service might expect
-RUN mkdir -p indicators models logs
+# Copy directories (now they exist)
+COPY indicators/ ./indicators/
+COPY models/ ./models/
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
