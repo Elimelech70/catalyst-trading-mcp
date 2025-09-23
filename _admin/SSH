@@ -1,4 +1,11 @@
 #Basic commands
+ssh -i ~/.ssh/claude_desktop_key root@68.183.177.11
+
+#connect vscode to droplet
+
+
+
+
 #Uses the Catalyst_droplet SSH key for authentication
 #From Droplet to local vscode workspace
 scp -i ~/.ssh/catalyst_droplet root@68.183.177.11:/root/text.txt ./
