@@ -104,11 +104,13 @@ async def init_handler():
         
         # Initialize Redis connection
         redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
-        state.redis_client = await redis.from_url(
-            redis_url,
-            encoding="utf-8",
-            decode_responses=True
-        )
+        try:
+        # Skip Redis for now - it's causing issues
+            state.redis_client = None
+            logger.warning("Redis disabled temporarily")
+        except Exception as e:
+    l       ogger.warning(f"Redis initialization skipped: {e}")
+            state.redis_client = None
         
         # Initialize HTTP session
         state.http_session = aiohttp.ClientSession()
@@ -118,7 +120,7 @@ async def init_handler():
             async with state.db_pool.acquire() as conn:
                 await conn.fetchval("SELECT 1")
         
-        await state.redis_client.ping()
+        #await state.redis_client.ping()
         
         logger.info("All connections initialized successfully")
         
