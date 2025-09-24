@@ -65,13 +65,13 @@ logger = logging.getLogger(__name__)
 # === SERVICE CONFIGURATION ===
 
 SERVICE_URLS = {
-    "scanner": os.getenv("SCANNER_URL", "http://scanner-service:5001"),
-    "pattern": os.getenv("PATTERN_URL", "http://pattern-service:5002"),
-    "technical": os.getenv("TECHNICAL_URL", "http://technical-service:5003"),
-    "risk_manager": os.getenv("RISK_URL", "http://risk-service:5004"),
-    "trading": os.getenv("TRADING_URL", "http://trading-service:5005"),
-    "news": os.getenv("NEWS_URL", "http://news-service:5008"),
-    "reporting": os.getenv("REPORTING_URL", "http://reporting-service:5009")
+    "scanner": os.getenv("SCANNER_URL", "http://localhost:5001"),
+    "pattern": os.getenv("PATTERN_URL", "http://localhost:5002"),
+    "technical": os.getenv("TECHNICAL_URL", "http://localhost:5003"),
+    "risk_manager": os.getenv("RISK_URL", "http://localhost:5004"),
+    "trading": os.getenv("TRADING_URL", "http://localhost:5005"),
+    "news": os.getenv("NEWS_URL", "http://localhost:5008"),
+    "reporting": os.getenv("REPORTING_URL", "http://localhost:5009")
 }
 
 class WorkflowState(Enum):
