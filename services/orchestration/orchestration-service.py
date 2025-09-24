@@ -65,13 +65,13 @@ logger = logging.getLogger(__name__)
 # === SERVICE CONFIGURATION ===
 
 SERVICE_URLS = {
-    "scanner": os.getenv("SCANNER_URL", "http://localhost:5001"),
-    "pattern": os.getenv("PATTERN_URL", "http://localhost:5002"),
-    "technical": os.getenv("TECHNICAL_URL", "http://localhost:5003"),
-    "risk_manager": os.getenv("RISK_URL", "http://localhost:5004"),
-    "trading": os.getenv("TRADING_URL", "http://localhost:5005"),
-    "news": os.getenv("NEWS_URL", "http://localhost:5008"),
-    "reporting": os.getenv("REPORTING_URL", "http://localhost:5009")
+    "scanner": os.getenv("SCANNER_URL", "http://172.18.0.1:5001"),
+    "pattern": os.getenv("PATTERN_URL", "http://172.18.0.1:5002"),
+    "technical": os.getenv("TECHNICAL_URL", "http://172.18.0.1:5003"),
+    "risk_manager": os.getenv("RISK_URL", "http://172.18.0.1:5004"),
+    "trading": os.getenv("TRADING_URL", "http://172.18.0.1:5005"),
+    "news": os.getenv("NEWS_URL", "http://172.18.0.1:5008"),
+    "reporting": os.getenv("REPORTING_URL", "http://172.18.0.1:5009")
 }
 
 class WorkflowState(Enum):
@@ -379,7 +379,7 @@ async def run_standalone():
     site = aiohttp.web.TCPSite(runner, '0.0.0.0', 5000)  # Listen on all interfaces
     await site.start()
     
-    logger.info("Orchestration service running on http://localhost:5000")
+    logger.info("Orchestration service running on http://172.18.0.1:5000")
     logger.info("Available endpoints:")
     logger.info("  - GET /health - Service health check")
     logger.info("  - GET /status - Detailed status")
