@@ -104,7 +104,7 @@ async def init_handler():
         
         # Initialize Redis connection
         redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
-        state.redis_client = redis.from_url(
+        state.redis_client = await redis.from_url(
             redis_url,
             encoding="utf-8",
             decode_responses=True
