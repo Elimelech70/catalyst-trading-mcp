@@ -229,7 +229,7 @@ def generate_cycle_id() -> str:
 
 # === MCP RESOURCES (Read Operations) ===
 
-@mcp.resource("trading_cycle/current")
+@mcp.resource("trading_cycle_current")
 async def get_current_cycle() -> Dict:
     """Get current trading cycle status"""
     if state.current_cycle:
@@ -265,7 +265,7 @@ async def get_cycle_performance() -> Dict:
         logger.error(f"Error getting cycle performance: {e}")
         return {"error": str(e)}
 
-@mcp.resource("market_scan/latest")
+@mcp.resource("market_scan_latest")
 async def get_latest_scan() -> Dict:
     """Get latest market scan results"""
     try:
