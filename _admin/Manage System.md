@@ -25,33 +25,35 @@ root       73360  0.0  0.0   7016  2272 pts/0    S+   06:10   0:00 grep --color=
 #----------------------------------------------
 # Script to get all logs
 # get-logs.sh
-#----------------------------------------------
+# ----------------------------------------------
 Puts logs in combined.log
 
+# Live logs (follow mode)
+docker-compose logs -f orchestration-service
 
 # ----------------------------------------------
-# starting service after py file updates
+## starting service after py file updates
 
-# Command		            Purpose 			                  When to Use
+## Command		            Purpose 			                  When to Use
 docker-compose up     	Creates + Starts containers	    First time or after changes
 docker-compose start	  Only Starts existing containers	Resume stopped containers
 
-# After changes to Py or Docker or Reqirements.txt
+### After changes to Py or Docker or Reqirements.txt
 docker-compose up -d --build scanner
 
-# If you change docker-compose.yml
+### If you change docker-compose.yml
 docker-compose up -d --build --force-recreate
 
-# Check if service is running
+### Check if service is running
 docker-compose ps scanner
 
-# View logs to confirm successful restart
+### View logs to confirm successful restart
 docker-compose logs -f scanner
 
 
 
 #----------------------------------------------------------
-# build
+## build
 When You MUST Build:
 ✅ Required when:
 
@@ -66,3 +68,8 @@ New dependencies added
 Just changing environment variables
 Restarting existing containers
 Only config/docker-compose.yml changes
+
+
+
+## Restart website
+sudo systemctl restart nginx
