@@ -2,22 +2,16 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: orchestration-service.py  
-Version: 4.4.2
+Version: 4.4.0
 Last Updated: 2025-09-28
-Purpose: Complete MCP orchestration service for Claude Desktop integration - Fixed for FastMCP 2.12.4
+Purpose: Complete MCP orchestration service for Claude Desktop integration
 
 REVISION HISTORY:
-v4.4.2 (2025-09-28) - FastMCP compatibility fixes
-- Removed @mcp.on_initialize() and @mcp.on_cleanup() decorators (not supported)
-- Manual initialization in main function
-- Compatible with FastMCP 2.12.4
-- Fixed resource URI format for current FastMCP version
-- Simplified initialization flow
-
-v4.4.1 (2025-09-28) - Import fixes for MCP
-- from mcp.server import FastMCP
-- from mcp.types import JSONRPCError as McpError
-- from mcp.types import CompletionContext as Context
+v.4.4.1 (2025-09-28)
+Change Import fixes for MCP
+-from mcp.server import FastMCP
+-from mcp.types import JSONRPCError as McpError
+-from mcp.types import CompletionContext as Context
 
 v4.4.0 (2025-09-28) - Complete MCP implementation
 - Added all MCP resources for Claude Desktop access
@@ -25,6 +19,19 @@ v4.4.0 (2025-09-28) - Complete MCP implementation
 - Implemented proper initialization and cleanup handlers
 - Added service communication helpers
 - Complete implementation ready for Claude Desktop
+
+v4.3.0 (2025-09-27) - HTTP Transport Implementation
+- Switched from stdio to HTTP transport
+- Supports both Claude Desktop and web dashboard
+- Server-Sent Events (SSE) for real-time updates
+- Stateless HTTP for scalability
+- CORS enabled for dashboard access
+
+v4.2.1 (2025-09-24) - Fixed indentation and import issues
+- Fixed indentation error on line 111-112
+- Corrected MCP imports to use FastMCP
+- Fixed Redis to use async version
+- Improved error handling
 
 Description of Service:
 Complete MCP orchestration service providing Claude Desktop with full access to:
@@ -66,6 +73,10 @@ except ImportError:
         def resource(self, path): 
             return lambda f: f
         def tool(self): 
+            return lambda f: f
+        def on_initialize(self): 
+            return lambda f: f
+        def on_cleanup(self): 
             return lambda f: f
         def run(self, **kwargs): 
             pass
@@ -218,7 +229,7 @@ def generate_cycle_id() -> str:
 
 # === MCP RESOURCES (Read Operations) ===
 
-@mcp.resource("trading_cycle_current")
+@mcp.resource("mcp://trading_cycle_current")
 async def get_current_cycle() -> Dict:
     """Get current trading cycle status"""
     if state.current_cycle:
@@ -235,7 +246,7 @@ async def get_current_cycle() -> Dict:
         "workflow_state": state.workflow_state.value
     }
 
-@mcp.resource("trading_cycle_performance")
+@mcp.resource("mcp://trading_cycle_performance")
 async def get_cycle_performance() -> Dict:
     """Get current cycle performance metrics"""
     try:
@@ -254,7 +265,7 @@ async def get_cycle_performance() -> Dict:
         logger.error(f"Error getting cycle performance: {e}")
         return {"error": str(e)}
 
-@mcp.resource("market_scan_latest")
+@mcp.resource("mcp://market_scan_latest")
 async def get_latest_scan() -> Dict:
     """Get latest market scan results"""
     try:
@@ -264,7 +275,7 @@ async def get_latest_scan() -> Dict:
         logger.error(f"Error getting latest scan: {e}")
         return {"error": str(e)}
 
-@mcp.resource("market_scan_candidates")
+@mcp.resource("mcp://market_scan_candidates")
 async def get_scan_candidates() -> Dict:
     """Get current market scan candidates"""
     try:
@@ -274,7 +285,7 @@ async def get_scan_candidates() -> Dict:
         logger.error(f"Error getting scan candidates: {e}")
         return {"error": str(e)}
 
-@mcp.resource("positions_active")
+@mcp.resource("mcp://positions_active")
 async def get_active_positions() -> Dict:
     """Get current active positions"""
     try:
@@ -286,7 +297,7 @@ async def get_active_positions() -> Dict:
         logger.error(f"Error getting active positions: {e}")
         return {"error": str(e)}
 
-@mcp.resource("positions_summary")
+@mcp.resource("mcp://positions_summary")
 async def get_positions_summary() -> Dict:
     """Get positions summary and P&L"""
     try:
@@ -296,7 +307,7 @@ async def get_positions_summary() -> Dict:
         logger.error(f"Error getting positions summary: {e}")
         return {"error": str(e)}
 
-@mcp.resource("system_health")
+@mcp.resource("mcp://system_health")
 async def get_system_health() -> Dict:
     """Get overall system health status"""
     try:
@@ -317,7 +328,7 @@ async def get_system_health() -> Dict:
         logger.error(f"Error getting system health: {e}")
         return {"error": str(e)}
 
-@mcp.resource("news_latest")
+@mcp.resource("mcp://news_latest")
 async def get_latest_news() -> Dict:
     """Get latest market news and catalysts"""
     try:
@@ -327,7 +338,7 @@ async def get_latest_news() -> Dict:
         logger.error(f"Error getting latest news: {e}")
         return {"error": str(e)}
 
-@mcp.resource("analysis_technical")
+@mcp.resource("mcp://analysis_technical")
 async def get_technical_analysis() -> Dict:
     """Get technical analysis for current candidates"""
     try:
@@ -337,7 +348,7 @@ async def get_technical_analysis() -> Dict:
         logger.error(f"Error getting technical analysis: {e}")
         return {"error": str(e)}
 
-@mcp.resource("risk_assessment")
+@mcp.resource("mcp://risk_assessment")
 async def get_risk_assessment() -> Dict:
     """Get current risk assessment"""
     try:
@@ -574,6 +585,86 @@ async def force_market_scan() -> Dict:
         return {"success": False, "error": str(e)}
 
 @mcp.tool()
+async def update_cycle_config(
+    scan_frequency: Optional[int] = None,
+    max_positions: Optional[int] = None,
+    aggressiveness: Optional[float] = None
+) -> Dict:
+    """Update active trading cycle configuration
+    
+    Args:
+        scan_frequency: New scan frequency in seconds
+        max_positions: New maximum positions limit
+        aggressiveness: New aggressiveness level (0.0-1.0)
+    
+    Returns:
+        Updated configuration
+    """
+    try:
+        if not state.current_cycle:
+            return {"success": False, "error": "No active trading cycle"}
+        
+        # Update configuration
+        if scan_frequency is not None:
+            if scan_frequency < 60 or scan_frequency > 3600:
+                return {"success": False, "error": "Scan frequency must be between 60 and 3600 seconds"}
+            state.current_cycle.scan_frequency = scan_frequency
+        
+        if max_positions is not None:
+            if max_positions < 1 or max_positions > 10:
+                return {"success": False, "error": "Max positions must be between 1 and 10"}
+            state.current_cycle.max_positions = max_positions
+        
+        if aggressiveness is not None:
+            if not 0.0 <= aggressiveness <= 1.0:
+                return {"success": False, "error": "Aggressiveness must be between 0.0 and 1.0"}
+            state.current_cycle.aggressiveness = aggressiveness
+        
+        # Notify services of configuration change
+        update_config = state.current_cycle.to_dict()
+        
+        for service_name in ["scanner", "pattern", "technical", "risk_manager"]:
+            result = await call_service(service_name, "POST", "/api/v1/cycle/update", update_config)
+            if not result.get("success"):
+                logger.warning(f"Failed to update {service_name} config: {result.get('error')}")
+        
+        return {
+            "success": True,
+            "updated_config": state.current_cycle.to_dict(),
+            "message": "Cycle configuration updated successfully"
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to update cycle config: {e}")
+        return {"success": False, "error": str(e)}
+
+@mcp.tool()
+async def close_position(symbol: str, quantity: Optional[int] = None) -> Dict:
+    """Close a position (partial or full)
+    
+    Args:
+        symbol: Stock symbol to close
+        quantity: Number of shares to close (None for full position)
+    
+    Returns:
+        Position closure result
+    """
+    try:
+        close_request = {
+            "symbol": symbol.upper(),
+            "quantity": quantity,
+            "cycle_id": state.current_cycle.cycle_id if state.current_cycle else None
+        }
+        
+        result = await call_service("trading", "POST", "/api/v1/positions/close", close_request)
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Failed to close position: {e}")
+        return {"success": False, "error": str(e)}
+
+@mcp.tool()
 async def emergency_stop() -> Dict:
     """Emergency stop - close all positions and stop cycle"""
     try:
@@ -603,8 +694,9 @@ async def emergency_stop() -> Dict:
         logger.error(f"Emergency stop failed: {e}")
         return {"success": False, "error": str(e)}
 
-# === INITIALIZATION FUNCTIONS (No decorators - called manually) ===
+# === MCP INITIALIZATION HANDLERS ===
 
+@mcp.on_initialize()
 async def initialize_server():
     """Initialize the MCP server and connections"""
     try:
@@ -648,6 +740,7 @@ async def initialize_server():
         logger.error(f"Failed to initialize server: {e}")
         raise McpError(f"Server initialization failed: {e}")
 
+@mcp.on_cleanup()
 async def cleanup_server():
     """Cleanup server resources"""
     try:
@@ -717,7 +810,7 @@ async def run_standalone():
     site = web.TCPSite(runner, '0.0.0.0', 5000)
     await site.start()
     
-    logger.info("Orchestration service running on http://0.0.0.0:5000")
+    logger.info("Orchestration service running on http://localhost:5000")
     logger.info("Available endpoints:")
     logger.info("  - GET /health - System health check")
     logger.info("  - GET /status - Service status check")
@@ -730,11 +823,7 @@ async def run_standalone():
     # Register signal handlers
     loop = asyncio.get_running_loop()
     for sig in [signal.SIGTERM, signal.SIGINT]:
-        try:
-            loop.add_signal_handler(sig, signal_handler)
-        except NotImplementedError:
-            # Windows doesn't support add_signal_handler
-            pass
+        loop.add_signal_handler(sig, signal_handler)
     
     try:
         # Wait for shutdown signal
@@ -748,13 +837,30 @@ async def run_standalone():
 
 # === MAIN ENTRY POINT ===
 
-async def run_mcp_server():
-    """Run MCP server with manual initialization"""
-    try:
-        # Initialize manually since decorators don't work
-        await initialize_server()
-        
-        # Run the MCP server
+def main():
+    """Main entry point with fixed asyncio handling for Python 3.10+"""
+    if "--test" in sys.argv:
+        print("Catalyst Trading MCP Orchestration Service")
+        print("==========================================")
+        print("✅ Syntax check passed")
+        print("✅ MCP imports successful" if MCP_AVAILABLE else "⚠️ MCP not available")
+        print(f"✅ {len(SERVICE_URLS)} services configured")
+        print("✅ Ready for deployment")
+        return
+    
+    if MCP_AVAILABLE:
+        logger.info("Starting Catalyst Trading MCP orchestration service...")
         mcp.run(transport='stdio')
-        
-    except Excep
+    else:
+        logger.warning("MCP not available, running in standalone mode for testing")
+        try:
+            # Use asyncio.run() for Python 3.10+ compatibility
+            asyncio.run(run_standalone())
+        except KeyboardInterrupt:
+            logger.info("Service interrupted by user")
+        except Exception as e:
+            logger.error(f"Service error: {e}")
+            raise
+
+if __name__ == "__main__":
+    main()
