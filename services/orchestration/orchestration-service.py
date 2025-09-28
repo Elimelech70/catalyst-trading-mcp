@@ -229,7 +229,7 @@ def generate_cycle_id() -> str:
 
 # === MCP RESOURCES (Read Operations) ===
 
-@mcp.resource("trading-cycle/current")
+@mcp.resource("trading_cycle/current")
 async def get_current_cycle() -> Dict:
     """Get current trading cycle status"""
     if state.current_cycle:
@@ -246,7 +246,7 @@ async def get_current_cycle() -> Dict:
         "workflow_state": state.workflow_state.value
     }
 
-@mcp.resource("trading-cycle/performance")
+@mcp.resource("trading_cycle_performance")
 async def get_cycle_performance() -> Dict:
     """Get current cycle performance metrics"""
     try:
@@ -265,7 +265,7 @@ async def get_cycle_performance() -> Dict:
         logger.error(f"Error getting cycle performance: {e}")
         return {"error": str(e)}
 
-@mcp.resource("market-scan/latest")
+@mcp.resource("market_scan/latest")
 async def get_latest_scan() -> Dict:
     """Get latest market scan results"""
     try:
@@ -275,7 +275,7 @@ async def get_latest_scan() -> Dict:
         logger.error(f"Error getting latest scan: {e}")
         return {"error": str(e)}
 
-@mcp.resource("market-scan/candidates")
+@mcp.resource("market_scan_candidates")
 async def get_scan_candidates() -> Dict:
     """Get current market scan candidates"""
     try:
@@ -285,7 +285,7 @@ async def get_scan_candidates() -> Dict:
         logger.error(f"Error getting scan candidates: {e}")
         return {"error": str(e)}
 
-@mcp.resource("positions/active")
+@mcp.resource("positions_active")
 async def get_active_positions() -> Dict:
     """Get current active positions"""
     try:
@@ -297,7 +297,7 @@ async def get_active_positions() -> Dict:
         logger.error(f"Error getting active positions: {e}")
         return {"error": str(e)}
 
-@mcp.resource("positions/summary")
+@mcp.resource("positions_summary")
 async def get_positions_summary() -> Dict:
     """Get positions summary and P&L"""
     try:
@@ -307,7 +307,7 @@ async def get_positions_summary() -> Dict:
         logger.error(f"Error getting positions summary: {e}")
         return {"error": str(e)}
 
-@mcp.resource("system/health")
+@mcp.resource("system_health")
 async def get_system_health() -> Dict:
     """Get overall system health status"""
     try:
@@ -328,7 +328,7 @@ async def get_system_health() -> Dict:
         logger.error(f"Error getting system health: {e}")
         return {"error": str(e)}
 
-@mcp.resource("news/latest")
+@mcp.resource("news_latest")
 async def get_latest_news() -> Dict:
     """Get latest market news and catalysts"""
     try:
@@ -338,7 +338,7 @@ async def get_latest_news() -> Dict:
         logger.error(f"Error getting latest news: {e}")
         return {"error": str(e)}
 
-@mcp.resource("analysis/technical")
+@mcp.resource("analysis_technical")
 async def get_technical_analysis() -> Dict:
     """Get technical analysis for current candidates"""
     try:
@@ -348,7 +348,7 @@ async def get_technical_analysis() -> Dict:
         logger.error(f"Error getting technical analysis: {e}")
         return {"error": str(e)}
 
-@mcp.resource("risk/assessment")
+@mcp.resource("risk_assessment")
 async def get_risk_assessment() -> Dict:
     """Get current risk assessment"""
     try:
