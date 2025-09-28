@@ -800,7 +800,7 @@ async def run_standalone():
     
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, 'localhost', 5000)
+    site = web.TCPSite(runner, '0.0.0.0', 5000)
     await site.start()
     
     logger.info("Orchestration service running on http://localhost:5000")
