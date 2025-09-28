@@ -29,7 +29,7 @@ root       73360  0.0  0.0   7016  2272 pts/0    S+   06:10   0:00 grep --color=
 Puts logs in combined.log
 
 # Live logs (follow mode)
-docker-compose logs -f orchestration-service
+docker-compose logs -f orchestration
 
 # ----------------------------------------------
 ## starting service after py file updates
