@@ -1,7 +1,5 @@
 # MCP/FastMCP
-fastmcp>=0.10.0
 asyncio-mqtt>=0.13.0
-mcp>=1.0.0
 
 # Web framework
 fastapi>=0.115.12
@@ -56,4 +54,4 @@ schedule>=1.2.0
 jinja2>=3.1.2
 click>=7.0
 python-dateutil>=2.8.2
-pytz>=2024.1
+pytz>=2024.1fastmcp
