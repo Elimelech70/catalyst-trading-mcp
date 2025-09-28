@@ -7,12 +7,6 @@ Last Updated: 2025-09-28
 Purpose: Complete MCP orchestration service for Claude Desktop integration
 
 REVISION HISTORY:
-v.4.4.1 (2025-09-28)
-Change Import fixes for MCP
--from mcp.server import FastMCP
--from mcp.types import JSONRPCError as McpError
--from mcp.types import CompletionContext as Context
-
 v4.4.0 (2025-09-28) - Complete MCP implementation
 - Added all MCP resources for Claude Desktop access
 - Added comprehensive MCP tools for trading operations
@@ -58,9 +52,8 @@ import uuid
 # MCP imports with fallback
 MCP_AVAILABLE = False
 try:
-    from mcp.server import FastMCP
-    from mcp.types import JSONRPCError as McpError
-    from mcp.types import CompletionContext as Context
+    from mcp.server.fastmcp import FastMCP, Context
+    from mcp.types import McpError
     MCP_AVAILABLE = True
     mcp = FastMCP("catalyst-orchestration")
 except ImportError:
