@@ -681,7 +681,7 @@ async def init_handler():
         return
     
     logger.info("Initializing standalone mode...")
-    await initialize_server()
+    asyncio.run(initialize_server())
 
 async def cleanup_handler():
     """Cleanup handler for standalone mode"""
@@ -689,7 +689,7 @@ async def cleanup_handler():
         return
     
     logger.info("Cleaning up standalone mode...")
-    await cleanup_server()
+    asyncio.run(cleanup_server())
 
 async def run_standalone():
     """Run in standalone mode for testing"""
@@ -752,7 +752,7 @@ def run_mcp_server():
     """Run MCP server with manual initialization"""
     try:
         # Initialize manually since decorators don't work
-        await initialize_server()
+        asyncio.run(initialize_server())
         
         # Run the MCP server
         mcp.run(transport='stdio')
@@ -762,7 +762,7 @@ def run_mcp_server():
         raise
     finally:
         # Cleanup manually
-        await cleanup_server()
+        asyncio.run(cleanup_server())
 
 def main():
     """Main entry point with fixed asyncio handling for Python 3.10+"""
