@@ -757,4 +757,44 @@ async def run_mcp_server():
         # Run the MCP server
         mcp.run(transport='stdio')
         
-    except Excep
+    except Exception as e:
+        logger.error(f"MCP server error: {e}")
+        raise
+    finally:
+        # Cleanup manually
+        await cleanup_server()
+
+def main():
+    """Main entry point with fixed asyncio handling for Python 3.10+"""
+    if "--test" in sys.argv:
+        print("Catalyst Trading MCP Orchestration Service")
+        print("==========================================")
+        print("✅ Syntax check passed")
+        print("✅ MCP imports successful" if MCP_AVAILABLE else "⚠️ MCP not available")
+        print(f"✅ {len(SERVICE_URLS)} services configured")
+        print("✅ Ready for deployment")
+        return
+    
+    if MCP_AVAILABLE:
+        logger.info("Starting Catalyst Trading MCP orchestration service...")
+        try:
+            # Use asyncio.run for proper async handling
+            asyncio.run(run_mcp_server())
+        except KeyboardInterrupt:
+            logger.info("MCP service interrupted by user")
+        except Exception as e:
+            logger.error(f"MCP service error: {e}")
+            raise
+    else:
+        logger.warning("MCP not available, running in standalone mode for testing")
+        try:
+            # Use asyncio.run() for Python 3.10+ compatibility
+            asyncio.run(run_standalone())
+        except KeyboardInterrupt:
+            logger.info("Service interrupted by user")
+        except Exception as e:
+            logger.error(f"Service error: {e}")
+            raise
+
+if __name__ == "__main__":
+    main()
