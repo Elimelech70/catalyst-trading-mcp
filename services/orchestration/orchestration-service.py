@@ -760,9 +760,7 @@ def run_mcp_server():
     except Exception as e:
         logger.error(f"MCP server error: {e}")
         raise
-    finally:
-        # Cleanup manually
-        asyncio.run(cleanup_server())
+
 
 def main():
     """Main entry point with fixed asyncio handling for Python 3.10+"""
