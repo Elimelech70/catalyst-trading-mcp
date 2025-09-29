@@ -748,7 +748,7 @@ async def run_standalone():
 
 # === MAIN ENTRY POINT ===
 
-async def run_mcp_server():
+def run_mcp_server():
     """Run MCP server with manual initialization"""
     try:
         # Initialize manually since decorators don't work
@@ -779,7 +779,7 @@ def main():
         logger.info("Starting Catalyst Trading MCP orchestration service...")
         try:
             # Use asyncio.run for proper async handling
-            asyncio.run(run_mcp_server())
+            run_mcp_server()
         except KeyboardInterrupt:
             logger.info("MCP service interrupted by user")
         except Exception as e:
