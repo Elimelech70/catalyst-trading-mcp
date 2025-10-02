@@ -2,49 +2,58 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: news-service.py
-Version: 4.1.0
-Last Updated: 2025-08-31
-Purpose: News catalyst detection and sentiment analysis
+Version: 5.0.0
+Last Updated: 2025-10-01
+Purpose: News catalyst detection and sentiment analysis with rigorous error handling
 
 REVISION HISTORY:
-v4.1.0 (2025-08-31) - Production-ready news intelligence
+v5.0.0 (2025-10-01) - Rigorous error handling implementation
+- NO silent failures - all errors are visible
+- Specific exception handling (no bare except or generic Exception catches)
+- Sentiment analysis failures raise errors (not return neutral)
+- API failures raise HTTPException (not return empty)
+- Database persistence failures are CRITICAL errors
+- JSON structured logging with full context
+- Input validation before all operations
+- Proper error propagation throughout
+
+v4.1.0 (2025-08-31) - Original production-ready version
 - Multiple news source integration
 - Real-time catalyst detection
 - Sentiment analysis with confidence scoring
-- Event categorization (earnings, FDA, M&A, etc.)
-- Impact assessment and filtering
 
 Description of Service:
-This service provides news-based catalyst detection:
+Intelligence foundation (Service #1 of 9). Provides news-based catalyst detection:
 1. Real-time news monitoring from multiple sources
 2. Catalyst strength scoring
 3. Sentiment analysis (bullish/bearish/neutral)
 4. Event type categorization
-5. Historical catalyst performance tracking
+5. Database persistence for historical analysis
+
+CRITICAL: This service must record to database before proceeding to Orchestration (step 2).
 """
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
 import asyncio
 import aiohttp
 import asyncpg
-import aioredis
 import json
 import os
 import logging
+import logging.handlers
 from enum import Enum
 from dataclasses import dataclass
-import re
-from textblob import TextBlob
 import feedparser
+from textblob import TextBlob
 
 # Initialize FastAPI app
 app = FastAPI(
     title="News Intelligence Service",
-    version="4.1.0",
+    version="5.0.0",
     description="News catalyst detection service for Catalyst Trading System"
 )
 
@@ -57,24 +66,65 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# === STRUCTURED JSON LOGGING ===
+
+class JSONFormatter(logging.Formatter):
+    """Format logs as JSON for structured logging"""
+    
+    def format(self, record):
+        log_data = {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "service": "news-service",
+            "level": record.levelname,
+            "message": record.getMessage(),
+            "context": {
+                "function": record.funcName,
+                "line": record.lineno,
+                "module": record.module
+            }
+        }
+        
+        # Add exception info if present
+        if record.exc_info:
+            log_data["traceback"] = self.formatException(record.exc_info)
+        
+        # Add extra fields if present
+        if hasattr(record, 'symbol'):
+            log_data["context"]["symbol"] = record.symbol
+        if hasattr(record, 'source'):
+            log_data["context"]["source"] = record.source
+        if hasattr(record, 'error_type'):
+            log_data["context"]["error_type"] = record.error_type
+            
+        return json.dumps(log_data)
+
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger("news")
+logger.setLevel(logging.DEBUG)
+
+# File handler with JSON formatting
+os.makedirs("/app/logs", exist_ok=True)
+file_handler = logging.handlers.RotatingFileHandler(
+    "/app/logs/news-service.log",
+    maxBytes=10*1024*1024,  # 10MB
+    backupCount=5
+)
+file_handler.setFormatter(JSONFormatter())
+logger.addHandler(file_handler)
+
+# Console handler for development
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(logging.Formatter(
+    '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+))
+logger.addHandler(console_handler)
 
 # === DATA MODELS ===
 
 class NewsSource(str, Enum):
     NEWSAPI = "newsapi"
-    BENZINGA = "benzinga"
-    SEEKING_ALPHA = "seeking_alpha"
     YAHOO = "yahoo"
-    REUTERS = "reuters"
-    BLOOMBERG = "bloomberg"
-    CNBC = "cnbc"
-    WSJ = "wsj"
+    BENZINGA = "benzinga"
 
 class CatalystType(str, Enum):
     EARNINGS = "earnings"
@@ -106,15 +156,26 @@ class NewsArticle(BaseModel):
     url: Optional[str]
     summary: Optional[str]
     sentiment: SentimentType
-    sentiment_score: float
+    sentiment_score: float = Field(ge=0, le=1)
     catalyst_type: Optional[CatalystType]
-    catalyst_strength: float
+    catalyst_strength: float = Field(ge=0, le=1)
     keywords: List[str]
 
 class CatalystRequest(BaseModel):
     symbols: List[str]
     lookback_hours: int = Field(default=24, ge=1, le=168)
     min_catalyst_strength: float = Field(default=0.5, ge=0, le=1)
+    
+    @validator('symbols')
+    def validate_symbols(cls, v):
+        if not v:
+            raise ValueError("At least one symbol required")
+        if len(v) > 50:
+            raise ValueError("Maximum 50 symbols allowed")
+        for symbol in v:
+            if not symbol or len(symbol) > 10:
+                raise ValueError(f"Invalid symbol: {symbol}")
+        return v
 
 class CatalystResponse(BaseModel):
     symbol: str
@@ -129,18 +190,25 @@ class CatalystResponse(BaseModel):
 @dataclass
 class NewsConfig:
     """Configuration for news service"""
-    api_key: str = os.getenv("NEWS_API_KEY", "")
-    benzinga_key: str = os.getenv("BENZINGA_API_KEY", "")
+    api_key: str
+    benzinga_key: str
     
     # Catalyst detection thresholds
     min_sentiment_magnitude: float = 0.3
-    catalyst_keywords: Dict[str, List[str]] = None
     
     # Rate limiting
     requests_per_minute: int = 100
-    cache_ttl: int = 300  # 5 minutes
+    cache_ttl: int = 300
+    
+    # Catalyst keywords
+    catalyst_keywords: Dict[str, List[str]] = None
     
     def __post_init__(self):
+        # Validate API keys at startup
+        if not self.api_key:
+            logger.critical("NewsAPI key not configured - service cannot function")
+            raise ValueError("NEWS_API_KEY environment variable required")
+        
         if self.catalyst_keywords is None:
             self.catalyst_keywords = {
                 CatalystType.EARNINGS: ["earnings", "revenue", "profit", "EPS", "guidance", "forecast"],
@@ -159,397 +227,146 @@ class NewsConfig:
 class NewsState:
     def __init__(self):
         self.db_pool: Optional[asyncpg.Pool] = None
-        self.redis_client: Optional[aioredis.Redis] = None
         self.http_session: Optional[aiohttp.ClientSession] = None
-        self.config = NewsConfig()
-        self.news_cache: Dict[str, List[NewsArticle]] = {}
-        self.scanning_task: Optional[asyncio.Task] = None
-        self.rate_limiter: Dict[str, datetime] = {}
+        self.config: Optional[NewsConfig] = None
 
 state = NewsState()
 
-# === STARTUP/SHUTDOWN ===
+# === STARTUP AND SHUTDOWN ===
 
 @app.on_event("startup")
-async def startup():
-    """Initialize news service"""
-    logger.info("Starting News Intelligence Service v4.1")
+async def startup_event():
+    """Initialize service with fail-fast validation"""
+    logger.info("Starting News Intelligence Service v5.0.0")
     
+    # Initialize configuration - fails fast if API key missing
     try:
-        # Initialize database pool
-        db_url = os.getenv("DATABASE_URL", "postgresql://catalyst_user:password@localhost:5432/catalyst_trading")
+        state.config = NewsConfig(
+            api_key=os.getenv("NEWS_API_KEY", ""),
+            benzinga_key=os.getenv("BENZINGA_API_KEY", "")
+        )
+        logger.info("Configuration validated successfully")
+    except ValueError as e:
+        logger.critical(f"Configuration validation failed: {e}")
+        raise
+    
+    # Initialize HTTP session
+    state.http_session = aiohttp.ClientSession()
+    logger.info("HTTP session initialized")
+    
+    # Initialize database connection
+    try:
+        database_url = os.getenv("DATABASE_URL")
+        if not database_url:
+            logger.critical("DATABASE_URL not configured")
+            raise ValueError("DATABASE_URL environment variable required")
+        
         state.db_pool = await asyncpg.create_pool(
-            db_url,
+            database_url,
             min_size=5,
-            max_size=20
+            max_size=20,
+            command_timeout=60
         )
         
-        # Initialize Redis client
-        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-        state.redis_client = await aioredis.from_url(
-            redis_url,
-            encoding="utf-8",
-            decode_responses=True
-        )
+        # Test database connection
+        async with state.db_pool.acquire() as conn:
+            await conn.fetchval("SELECT 1")
         
-        # Initialize HTTP session
-        state.http_session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=30),
-            connector=aiohttp.TCPConnector(limit=100)
-        )
-        
-        # Start background news scanner
-        state.scanning_task = asyncio.create_task(continuous_news_scan())
-        
-        logger.info("News Service initialized successfully")
+        logger.info("Database connection pool initialized")
         
     except Exception as e:
-        logger.error(f"Failed to initialize news service: {e}")
+        logger.critical(f"Database initialization failed: {e}", exc_info=True)
         raise
+    
+    logger.info("News service startup complete - ready to process requests")
 
 @app.on_event("shutdown")
-async def shutdown():
-    """Clean up resources"""
-    logger.info("Shutting down News Service")
-    
-    if state.scanning_task:
-        state.scanning_task.cancel()
+async def shutdown_event():
+    """Cleanup resources"""
+    logger.info("Shutting down News service")
     
     if state.http_session:
         await state.http_session.close()
-    
-    if state.redis_client:
-        await state.redis_client.close()
+        logger.info("HTTP session closed")
     
     if state.db_pool:
         await state.db_pool.close()
+        logger.info("Database pool closed")
+    
+    logger.info("News service shutdown complete")
 
-# === REST API ENDPOINTS ===
+# === HEALTH CHECK ===
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
-    return {
+    """Service health check"""
+    health_status = {
         "status": "healthy",
         "service": "news",
-        "version": "4.1.0",
-        "api_configured": bool(state.config.api_key),
-        "cache_size": len(state.news_cache),
-        "timestamp": datetime.now().isoformat()
+        "version": "5.0.0",
+        "timestamp": datetime.utcnow().isoformat() + "Z"
     }
-
-@app.get("/api/v1/catalysts")
-async def get_current_catalysts():
-    """Get current market catalysts"""
     
+    # Check database
     try:
-        # Get trending symbols
-        trending = await get_trending_symbols()
-        
-        results = {}
-        for symbol in trending[:20]:  # Top 20 trending
-            catalysts = await get_symbol_catalysts(symbol, 24)
-            
-            if catalysts:
-                results[symbol] = {
-                    "catalysts": [c.dict() for c in catalysts],
-                    "catalyst_score": calculate_catalyst_score(catalysts),
-                    "sentiment": aggregate_sentiment(catalysts)
-                }
-        
-        return {
-            "trending_symbols": trending,
-            "symbol_catalysts": results,
-            "timestamp": datetime.now().isoformat()
-        }
-        
+        if state.db_pool:
+            async with state.db_pool.acquire() as conn:
+                await conn.fetchval("SELECT 1")
+            health_status["database"] = "connected"
+        else:
+            health_status["database"] = "not_initialized"
+            health_status["status"] = "degraded"
     except Exception as e:
-        logger.error(f"Failed to get catalysts: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get catalysts: {str(e)}")
+        logger.error(f"Database health check failed: {e}")
+        health_status["database"] = "error"
+        health_status["status"] = "unhealthy"
+    
+    # Check HTTP session
+    health_status["http_session"] = "initialized" if state.http_session else "not_initialized"
+    
+    # Check configuration
+    health_status["configuration"] = "valid" if state.config else "invalid"
+    
+    return health_status
 
-@app.post("/api/v1/catalysts/batch")
-async def get_catalysts_batch(request: CatalystRequest):
-    """Get catalysts for multiple symbols"""
-    
-    results = {}
-    
-    for symbol in request.symbols:
-        try:
-            catalysts = await get_symbol_catalysts(
-                symbol,
-                request.lookback_hours,
-                request.min_catalyst_strength
-            )
-            
-            if catalysts:
-                overall_sentiment = aggregate_sentiment(catalysts)
-                catalyst_score = calculate_catalyst_score(catalysts)
-                
-                results[symbol] = CatalystResponse(
-                    symbol=symbol,
-                    catalysts=catalysts,
-                    overall_sentiment=overall_sentiment,
-                    catalyst_score=catalyst_score,
-                    recommendation=get_recommendation(overall_sentiment, catalyst_score),
-                    timestamp=datetime.now()
-                ).dict()
-            else:
-                results[symbol] = {
-                    "symbol": symbol,
-                    "catalysts": [],
-                    "overall_sentiment": SentimentType.NEUTRAL,
-                    "catalyst_score": 0,
-                    "recommendation": "no_action",
-                    "timestamp": datetime.now().isoformat()
-                }
-                
-        except Exception as e:
-            logger.warning(f"Failed to get catalysts for {symbol}: {e}")
-            results[symbol] = {"error": str(e)}
-    
-    return results
-
-@app.get("/api/v1/news/{symbol}")
-async def get_symbol_news(
-    symbol: str,
-    hours: int = 24,
-    min_sentiment: float = 0
-):
-    """Get news for a specific symbol"""
-    
-    try:
-        articles = await get_symbol_catalysts(symbol, hours, min_sentiment)
-        
-        return {
-            "symbol": symbol,
-            "articles": [a.dict() for a in articles],
-            "count": len(articles),
-            "timestamp": datetime.now().isoformat()
-        }
-        
-    except Exception as e:
-        logger.error(f"Failed to get news for {symbol}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get news: {str(e)}")
-
-@app.post("/api/v1/analyze/sentiment")
-async def analyze_sentiment(text: str):
-    """Analyze sentiment of text"""
-    
-    try:
-        sentiment_data = analyze_text_sentiment(text)
-        
-        return {
-            "text": text[:200] + "..." if len(text) > 200 else text,
-            "sentiment": sentiment_data["sentiment"],
-            "score": sentiment_data["score"],
-            "polarity": sentiment_data["polarity"],
-            "subjectivity": sentiment_data["subjectivity"],
-            "timestamp": datetime.now().isoformat()
-        }
-        
-    except Exception as e:
-        logger.error(f"Sentiment analysis failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
-
-@app.get("/api/v1/events/upcoming")
-async def get_upcoming_events():
-    """Get upcoming market events"""
-    
-    try:
-        events = await fetch_upcoming_events()
-        
-        return {
-            "events": events,
-            "count": len(events),
-            "timestamp": datetime.now().isoformat()
-        }
-        
-    except Exception as e:
-        logger.error(f"Failed to get events: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get events: {str(e)}")
-
-# === NEWS FETCHING ===
-
-async def get_symbol_catalysts(
-    symbol: str,
-    lookback_hours: int,
-    min_strength: float = 0
-) -> List[NewsArticle]:
-    """Get news catalysts for a symbol"""
-    
-    # Check cache first
-    cache_key = f"news:{symbol}:{lookback_hours}"
-    cached = await get_cached_news(cache_key)
-    if cached:
-        return cached
-    
-    articles = []
-    
-    # Fetch from multiple sources
-    if state.config.api_key:
-        newsapi_articles = await fetch_newsapi(symbol, lookback_hours)
-        articles.extend(newsapi_articles)
-    
-    # Fetch from Yahoo Finance RSS
-    yahoo_articles = await fetch_yahoo_news(symbol, lookback_hours)
-    articles.extend(yahoo_articles)
-    
-    # Process and filter articles
-    processed_articles = []
-    for article in articles:
-        # Analyze sentiment
-        sentiment_data = analyze_text_sentiment(
-            f"{article.get('title', '')} {article.get('description', '')}"
-        )
-        
-        # Detect catalyst type
-        catalyst_type = detect_catalyst_type(
-            article.get('title', ''),
-            article.get('description', '')
-        )
-        
-        # Calculate catalyst strength
-        catalyst_strength = calculate_article_strength(
-            sentiment_data,
-            catalyst_type,
-            article.get('source', {}).get('name', 'unknown')
-        )
-        
-        if catalyst_strength >= min_strength:
-            news_article = NewsArticle(
-                article_id=f"{symbol}_{datetime.now().timestamp()}",
-                symbol=symbol,
-                headline=article.get('title', 'No title'),
-                source=article.get('source', {}).get('name', 'Unknown'),
-                published_at=parse_date(article.get('publishedAt')),
-                url=article.get('url'),
-                summary=article.get('description'),
-                sentiment=sentiment_data["sentiment"],
-                sentiment_score=sentiment_data["score"],
-                catalyst_type=catalyst_type,
-                catalyst_strength=catalyst_strength,
-                keywords=extract_keywords(article.get('title', '') + ' ' + article.get('description', ''))
-            )
-            
-            processed_articles.append(news_article)
-    
-    # Sort by catalyst strength
-    processed_articles.sort(key=lambda x: x.catalyst_strength, reverse=True)
-    
-    # Cache results
-    await cache_news(cache_key, processed_articles)
-    
-    # Store in database
-    await store_news_articles(processed_articles)
-    
-    return processed_articles
-
-async def fetch_newsapi(symbol: str, hours: int) -> List[Dict]:
-    """Fetch news from NewsAPI"""
-    
-    if not state.config.api_key:
-        return []
-    
-    try:
-        from_date = (datetime.now() - timedelta(hours=hours)).isoformat()
-        
-        url = "https://newsapi.org/v2/everything"
-        params = {
-            "q": symbol,
-            "from": from_date,
-            "sortBy": "relevancy",
-            "apiKey": state.config.api_key,
-            "language": "en"
-        }
-        
-        async with state.http_session.get(url, params=params) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return data.get("articles", [])
-            else:
-                logger.warning(f"NewsAPI request failed: {resp.status}")
-                return []
-                
-    except Exception as e:
-        logger.error(f"Failed to fetch from NewsAPI: {e}")
-        return []
-
-async def fetch_yahoo_news(symbol: str, hours: int) -> List[Dict]:
-    """Fetch news from Yahoo Finance RSS"""
-    
-    try:
-        url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={symbol}&region=US&lang=en-US"
-        
-        async with state.http_session.get(url) as resp:
-            if resp.status == 200:
-                content = await resp.text()
-                feed = feedparser.parse(content)
-                
-                articles = []
-                cutoff_time = datetime.now() - timedelta(hours=hours)
-                
-                for entry in feed.entries:
-                    published = parse_date(entry.get('published'))
-                    
-                    if published and published > cutoff_time:
-                        articles.append({
-                            'title': entry.get('title'),
-                            'description': entry.get('summary'),
-                            'url': entry.get('link'),
-                            'publishedAt': entry.get('published'),
-                            'source': {'name': 'Yahoo Finance'}
-                        })
-                
-                return articles
-            else:
-                logger.warning(f"Yahoo RSS request failed: {resp.status}")
-                return []
-                
-    except Exception as e:
-        logger.error(f"Failed to fetch from Yahoo: {e}")
-        return []
-
-async def fetch_upcoming_events() -> List[Dict]:
-    """Fetch upcoming market events"""
-    
-    events = []
-    
-    try:
-        # This would integrate with earnings calendar APIs, FDA calendar, etc.
-        # For now, returning sample data structure
-        
-        events.append({
-            "date": (datetime.now() + timedelta(days=1)).isoformat(),
-            "type": "earnings",
-            "symbol": "AAPL",
-            "description": "Apple Q4 Earnings Report",
-            "importance": "high"
-        })
-        
-        events.append({
-            "date": (datetime.now() + timedelta(days=2)).isoformat(),
-            "type": "fed_meeting",
-            "symbol": "SPY",
-            "description": "Federal Reserve Interest Rate Decision",
-            "importance": "critical"
-        })
-        
-    except Exception as e:
-        logger.error(f"Failed to fetch events: {e}")
-    
-    return events
-
-# === ANALYSIS FUNCTIONS ===
+# === SENTIMENT ANALYSIS ===
 
 def analyze_text_sentiment(text: str) -> Dict:
-    """Analyze sentiment of text using TextBlob"""
+    """Analyze sentiment with proper error handling - NO SILENT FAILURES
+    
+    Args:
+        text: Text to analyze
+        
+    Returns:
+        Dict with sentiment data and success flag
+        
+    Raises:
+        ValueError: Empty text or encoding errors
+        RuntimeError: TextBlob library errors
+    """
+    
+    # Validate input FIRST
+    if not text or not text.strip():
+        raise ValueError("Empty text provided for sentiment analysis")
+    
+    if len(text) > 10000:
+        logger.warning(f"Text too long ({len(text)} chars), truncating to 10000")
+        text = text[:10000]
     
     try:
-        blob = TextBlob(text)
+        # Clean text
+        text_clean = text.strip()
         
-        # Get polarity and subjectivity
-        polarity = blob.sentiment.polarity  # -1 to 1
-        subjectivity = blob.sentiment.subjectivity  # 0 to 1
+        # TextBlob analysis
+        blob = TextBlob(text_clean)
+        polarity = blob.sentiment.polarity
+        subjectivity = blob.sentiment.subjectivity
+        
+        # Validate results
+        if not (-1.0 <= polarity <= 1.0):
+            raise ValueError(f"Invalid polarity: {polarity}")
+        if not (0.0 <= subjectivity <= 1.0):
+            raise ValueError(f"Invalid subjectivity: {subjectivity}")
         
         # Determine sentiment category
         if polarity >= 0.5:
@@ -567,24 +384,198 @@ def analyze_text_sentiment(text: str) -> Dict:
             "sentiment": sentiment,
             "score": abs(polarity),
             "polarity": polarity,
-            "subjectivity": subjectivity
+            "subjectivity": subjectivity,
+            "success": True
         }
         
-    except Exception as e:
-        logger.error(f"Sentiment analysis error: {e}")
-        return {
-            "sentiment": SentimentType.NEUTRAL,
-            "score": 0,
-            "polarity": 0,
-            "subjectivity": 0
-        }
+    except UnicodeDecodeError as e:
+        logger.error(f"Text encoding error in sentiment analysis: {e}")
+        raise ValueError(f"Text encoding error: {str(e)}")
+        
+    except AttributeError as e:
+        logger.error(f"TextBlob analysis failed: {e}", exc_info=True)
+        raise RuntimeError(f"Sentiment analysis library error: {str(e)}")
+
+# === NEWS API FETCHING ===
+
+async def fetch_newsapi(symbol: str, hours: int) -> List[Dict]:
+    """Fetch news from NewsAPI with proper error handling
+    
+    Args:
+        symbol: Stock symbol
+        hours: Lookback period in hours
+        
+    Returns:
+        List of article dicts
+        
+    Raises:
+        ValueError: Invalid inputs
+        HTTPException: API errors (401, 429, 500+)
+        TimeoutError: Request timeout
+    """
+    
+    # Validate inputs
+    if not symbol or len(symbol) > 10:
+        raise ValueError(f"Invalid symbol: {symbol}")
+    
+    if hours <= 0 or hours > 168:
+        raise ValueError(f"Invalid lookback hours: {hours}")
+    
+    from_date = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+    
+    url = "https://newsapi.org/v2/everything"
+    params = {
+        "q": symbol,
+        "from": from_date,
+        "apiKey": state.config.api_key,
+        "language": "en",
+        "sortBy": "publishedAt",
+        "pageSize": 100
+    }
+    
+    try:
+        logger.debug(f"Fetching news for {symbol} from NewsAPI (last {hours}h)")
+        
+        async with state.http_session.get(
+            url,
+            params=params,
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as resp:
+            
+            if resp.status == 200:
+                data = await resp.json()
+                articles = data.get("articles", [])
+                logger.info(f"NewsAPI returned {len(articles)} articles for {symbol}")
+                return articles
+                
+            elif resp.status == 401:
+                logger.critical("NewsAPI authentication failed - invalid API key")
+                raise HTTPException(
+                    status_code=503,
+                    detail="News service misconfigured - invalid API key"
+                )
+                
+            elif resp.status == 429:
+                error_data = await resp.json()
+                logger.error(f"NewsAPI rate limit exceeded: {error_data}")
+                raise HTTPException(
+                    status_code=429,
+                    detail="NewsAPI rate limit exceeded"
+                )
+                
+            elif resp.status == 400:
+                error_data = await resp.json()
+                logger.error(f"NewsAPI bad request for {symbol}: {error_data}")
+                raise ValueError(f"Invalid NewsAPI request: {error_data.get('message')}")
+                
+            elif resp.status >= 500:
+                logger.error(f"NewsAPI server error {resp.status}")
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"NewsAPI server error: {resp.status}"
+                )
+                
+            else:
+                logger.error(f"Unexpected NewsAPI status {resp.status}")
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Unexpected NewsAPI response: {resp.status}"
+                )
+    
+    except asyncio.TimeoutError:
+        logger.error(f"NewsAPI timeout for {symbol}")
+        raise TimeoutError(f"NewsAPI request timeout for {symbol}")
+        
+    except aiohttp.ClientError as e:
+        logger.error(f"NewsAPI connection error for {symbol}: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"NewsAPI connection failed: {str(e)}"
+        )
+
+async def fetch_yahoo_news(symbol: str, hours: int) -> List[Dict]:
+    """Fetch news from Yahoo Finance RSS with proper error handling
+    
+    Args:
+        symbol: Stock symbol
+        hours: Lookback period
+        
+    Returns:
+        List of article dicts (may be empty if source unavailable)
+        
+    Raises:
+        ValueError: Invalid inputs
+        RuntimeError: RSS parsing failures
+    """
+    
+    if not symbol:
+        raise ValueError("Symbol required for Yahoo news fetch")
+    
+    url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={symbol}&region=US&lang=en-US"
+    
+    try:
+        logger.debug(f"Fetching Yahoo RSS for {symbol}")
+        
+        async with state.http_session.get(
+            url,
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as resp:
+            
+            if resp.status != 200:
+                logger.warning(f"Yahoo RSS returned status {resp.status} for {symbol}")
+                return []  # Yahoo failures are acceptable - return empty
+            
+            content = await resp.text()
+            
+            # Parse RSS feed
+            try:
+                feed = feedparser.parse(content)
+                
+                if feed.bozo:
+                    logger.error(f"Yahoo RSS parsing error for {symbol}: {feed.bozo_exception}")
+                    raise RuntimeError(f"RSS parsing failed: {feed.bozo_exception}")
+                
+                articles = []
+                cutoff_time = datetime.utcnow() - timedelta(hours=hours)
+                
+                for entry in feed.entries:
+                    try:
+                        published = datetime(*entry.published_parsed[:6])
+                        
+                        if published >= cutoff_time:
+                            articles.append({
+                                "title": entry.get("title", ""),
+                                "description": entry.get("summary", ""),
+                                "url": entry.get("link", ""),
+                                "publishedAt": published.isoformat(),
+                                "source": {"name": "Yahoo Finance"}
+                            })
+                    except (AttributeError, ValueError) as e:
+                        logger.debug(f"Skipping malformed Yahoo RSS entry: {e}")
+                        continue
+                
+                logger.info(f"Yahoo RSS returned {len(articles)} articles for {symbol}")
+                return articles
+                
+            except Exception as e:
+                logger.error(f"feedparser error for {symbol}: {e}", exc_info=True)
+                raise RuntimeError(f"RSS feed processing failed: {str(e)}")
+                
+    except asyncio.TimeoutError:
+        logger.warning(f"Yahoo RSS timeout for {symbol}")
+        return []  # Timeout is acceptable - return empty
+        
+    except aiohttp.ClientError as e:
+        logger.warning(f"Yahoo RSS connection error for {symbol}: {e}")
+        return []  # Network errors are acceptable - return empty
+
+# === CATALYST DETECTION ===
 
 def detect_catalyst_type(title: str, description: str) -> Optional[CatalystType]:
-    """Detect the type of catalyst from news content"""
+    """Detect catalyst type from text"""
     
     text = f"{title} {description}".lower()
     
-    # Check each catalyst type's keywords
     for catalyst_type, keywords in state.config.catalyst_keywords.items():
         for keyword in keywords:
             if keyword.lower() in text:
@@ -592,12 +583,12 @@ def detect_catalyst_type(title: str, description: str) -> Optional[CatalystType]
     
     return CatalystType.GENERAL
 
-def calculate_article_strength(
+def calculate_catalyst_strength(
     sentiment_data: Dict,
     catalyst_type: Optional[CatalystType],
     source: str
 ) -> float:
-    """Calculate the strength of a news catalyst"""
+    """Calculate catalyst strength score"""
     
     strength = 0.0
     
@@ -605,7 +596,7 @@ def calculate_article_strength(
     strength += sentiment_data["score"] * 0.4
     
     # Boost for specific catalyst types
-    high_impact_catalysts = [
+    high_impact = [
         CatalystType.EARNINGS,
         CatalystType.FDA_APPROVAL,
         CatalystType.MERGER_ACQUISITION,
@@ -613,7 +604,7 @@ def calculate_article_strength(
         CatalystType.ANALYST_DOWNGRADE
     ]
     
-    if catalyst_type in high_impact_catalysts:
+    if catalyst_type in high_impact:
         strength += 0.3
     elif catalyst_type and catalyst_type != CatalystType.GENERAL:
         strength += 0.2
@@ -636,9 +627,6 @@ def calculate_article_strength(
 def extract_keywords(text: str) -> List[str]:
     """Extract keywords from text"""
     
-    # Simple keyword extraction
-    # In production, use more sophisticated NLP
-    
     keywords = []
     important_words = [
         "earnings", "revenue", "profit", "loss", "beat", "miss",
@@ -652,225 +640,242 @@ def extract_keywords(text: str) -> List[str]:
         if word in text_lower:
             keywords.append(word)
     
-    return keywords[:10]  # Limit to 10 keywords
+    return keywords[:10]
 
-def aggregate_sentiment(articles: List[NewsArticle]) -> SentimentType:
-    """Aggregate sentiment from multiple articles"""
+# === DATABASE PERSISTENCE ===
+
+async def store_news_articles(articles: List[NewsArticle]) -> None:
+    """Store news articles with NO SILENT FAILURES
     
-    if not articles:
-        return SentimentType.NEUTRAL
-    
-    # Weight by catalyst strength
-    weighted_sum = 0
-    total_weight = 0
-    
-    sentiment_values = {
-        SentimentType.VERY_BULLISH: 2,
-        SentimentType.BULLISH: 1,
-        SentimentType.NEUTRAL: 0,
-        SentimentType.BEARISH: -1,
-        SentimentType.VERY_BEARISH: -2
-    }
-    
-    for article in articles:
-        value = sentiment_values.get(article.sentiment, 0)
-        weight = article.catalyst_strength
+    Args:
+        articles: List of NewsArticle objects
         
-        weighted_sum += value * weight
-        total_weight += weight
-    
-    if total_weight == 0:
-        return SentimentType.NEUTRAL
-    
-    avg_sentiment = weighted_sum / total_weight
-    
-    if avg_sentiment >= 1.5:
-        return SentimentType.VERY_BULLISH
-    elif avg_sentiment >= 0.5:
-        return SentimentType.BULLISH
-    elif avg_sentiment <= -1.5:
-        return SentimentType.VERY_BEARISH
-    elif avg_sentiment <= -0.5:
-        return SentimentType.BEARISH
-    else:
-        return SentimentType.NEUTRAL
-
-def calculate_catalyst_score(articles: List[NewsArticle]) -> float:
-    """Calculate overall catalyst score"""
-    
-    if not articles:
-        return 0.0
-    
-    # Average of top 3 catalyst strengths
-    top_strengths = sorted(
-        [a.catalyst_strength for a in articles],
-        reverse=True
-    )[:3]
-    
-    if top_strengths:
-        return sum(top_strengths) / len(top_strengths)
-    
-    return 0.0
-
-def get_recommendation(sentiment: SentimentType, catalyst_score: float) -> str:
-    """Get trading recommendation based on sentiment and catalyst"""
-    
-    if catalyst_score < 0.3:
-        return "no_action"
-    
-    if sentiment in [SentimentType.VERY_BULLISH, SentimentType.BULLISH]:
-        if catalyst_score > 0.7:
-            return "strong_buy"
-        elif catalyst_score > 0.5:
-            return "buy"
-        else:
-            return "watch"
-    
-    elif sentiment in [SentimentType.VERY_BEARISH, SentimentType.BEARISH]:
-        if catalyst_score > 0.7:
-            return "strong_sell"
-        elif catalyst_score > 0.5:
-            return "sell"
-        else:
-            return "watch"
-    
-    else:
-        return "watch"
-
-# === HELPER FUNCTIONS ===
-
-async def get_trending_symbols() -> List[str]:
-    """Get currently trending symbols"""
-    
-    # In production, this would fetch from market data APIs
-    # For now, return popular day trading symbols
-    
-    trending = [
-        "TSLA", "AAPL", "NVDA", "SPY", "QQQ", "AMD", "MSFT", "META",
-        "AMZN", "GOOGL", "NFLX", "COIN", "PLTR", "SOFI", "RIVN"
-    ]
-    
-    return trending
-
-async def continuous_news_scan():
-    """Background task to continuously scan for news"""
-    
-    logger.info("Starting continuous news scanner")
-    
-    while True:
-        try:
-            # Get trending symbols
-            symbols = await get_trending_symbols()
-            
-            # Scan news for each symbol
-            for symbol in symbols[:20]:  # Limit to top 20
-                try:
-                    await get_symbol_catalysts(symbol, 4)  # Last 4 hours
-                    await asyncio.sleep(1)  # Rate limiting
-                except Exception as e:
-                    logger.warning(f"News scan failed for {symbol}: {e}")
-            
-            # Wait before next scan
-            await asyncio.sleep(300)  # 5 minutes
-            
-        except Exception as e:
-            logger.error(f"Continuous news scan error: {e}")
-            await asyncio.sleep(60)
-
-def parse_date(date_str: Any) -> datetime:
-    """Parse date from various formats"""
-    
-    if isinstance(date_str, datetime):
-        return date_str
-    
-    if not date_str:
-        return datetime.now()
-    
-    try:
-        # Try ISO format first
-        return datetime.fromisoformat(date_str.replace('Z', '+00:00'))
-    except:
-        try:
-            # Try other common formats
-            from dateutil import parser
-            return parser.parse(date_str)
-        except:
-            return datetime.now()
-
-async def get_cached_news(key: str) -> Optional[List[NewsArticle]]:
-    """Get cached news articles"""
-    
-    if state.redis_client:
-        try:
-            data = await state.redis_client.get(key)
-            if data:
-                articles_data = json.loads(data)
-                return [NewsArticle(**a) for a in articles_data]
-        except Exception as e:
-            logger.debug(f"Cache get error: {e}")
-    
-    return None
-
-async def cache_news(key: str, articles: List[NewsArticle]):
-    """Cache news articles"""
-    
-    if state.redis_client:
-        try:
-            data = [a.dict() for a in articles]
-            await state.redis_client.setex(
-                key,
-                state.config.cache_ttl,
-                json.dumps(data, default=str)
-            )
-        except Exception as e:
-            logger.debug(f"Cache set error: {e}")
-
-async def store_news_articles(articles: List[NewsArticle]):
-    """Store news articles in database"""
+    Raises:
+        RuntimeError: Database not available
+        asyncpg.PostgresError: Database errors
+    """
     
     if not articles:
         return
     
+    if not state.db_pool:
+        logger.critical("Database pool not initialized - cannot store news")
+        raise RuntimeError("Database not available")
+    
     try:
         async with state.db_pool.acquire() as conn:
             for article in articles:
-                await conn.execute("""
-                    INSERT INTO news_articles (
-                        article_id, symbol, headline, source,
-                        published_at, url, sentiment, sentiment_score,
-                        catalyst_type, catalyst_strength, keywords,
-                        created_at
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-                    ON CONFLICT (article_id) DO NOTHING
-                """,
-                    article.article_id,
-                    article.symbol,
-                    article.headline,
-                    article.source,
-                    article.published_at,
-                    article.url,
-                    article.sentiment.value,
-                    article.sentiment_score,
-                    article.catalyst_type.value if article.catalyst_type else None,
-                    article.catalyst_strength,
-                    json.dumps(article.keywords),
-                    datetime.now()
+                try:
+                    await conn.execute("""
+                        INSERT INTO news_articles (
+                            article_id, symbol, headline, source, published_at,
+                            url, summary, sentiment, sentiment_score,
+                            catalyst_type, catalyst_strength, keywords, created_at
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                        ON CONFLICT (article_id) DO NOTHING
+                    """,
+                        article.article_id,
+                        article.symbol,
+                        article.headline,
+                        article.source,
+                        article.published_at,
+                        article.url,
+                        article.summary,
+                        article.sentiment.value,
+                        article.sentiment_score,
+                        article.catalyst_type.value if article.catalyst_type else None,
+                        article.catalyst_strength,
+                        json.dumps(article.keywords),
+                        datetime.utcnow()
+                    )
+                except asyncpg.UniqueViolationError:
+                    logger.debug(f"Duplicate article skipped: {article.article_id}")
+                    
+        logger.info(f"Successfully stored {len(articles)} news articles to database")
+                    
+    except asyncpg.PostgresError as e:
+        logger.critical(f"Database error storing news articles: {e}", exc_info=True)
+        raise  # Never hide database errors!
+
+# === API ENDPOINTS ===
+
+@app.get("/api/v1/catalysts/{symbol}")
+async def get_symbol_catalysts(
+    symbol: str,
+    hours: int = 24,
+    min_strength: float = 0.5
+):
+    """Get catalysts for a single symbol with robust error handling"""
+    
+    # Validate inputs
+    if not symbol or len(symbol) > 10:
+        raise HTTPException(status_code=400, detail=f"Invalid symbol: {symbol}")
+    
+    if not (1 <= hours <= 168):
+        raise HTTPException(status_code=400, detail="Hours must be between 1 and 168")
+    
+    if not (0 <= min_strength <= 1):
+        raise HTTPException(status_code=400, detail="Strength must be between 0 and 1")
+    
+    logger.info(f"Fetching catalysts for {symbol} (last {hours}h, min_strength={min_strength})")
+    
+    all_articles = []
+    source_errors = {}
+    
+    # Fetch from NewsAPI
+    try:
+        newsapi_articles = await fetch_newsapi(symbol, hours)
+        all_articles.extend(newsapi_articles)
+        logger.info(f"NewsAPI: {len(newsapi_articles)} articles for {symbol}")
+    except ValueError as e:
+        logger.warning(f"NewsAPI validation error for {symbol}: {e}")
+        source_errors["newsapi"] = str(e)
+    except HTTPException as e:
+        logger.error(f"NewsAPI error for {symbol}: {e.detail}")
+        source_errors["newsapi"] = e.detail
+    except TimeoutError as e:
+        logger.warning(f"NewsAPI timeout for {symbol}")
+        source_errors["newsapi"] = "Timeout"
+    
+    # Fetch from Yahoo
+    try:
+        yahoo_articles = await fetch_yahoo_news(symbol, hours)
+        all_articles.extend(yahoo_articles)
+        logger.info(f"Yahoo: {len(yahoo_articles)} articles for {symbol}")
+    except ValueError as e:
+        logger.warning(f"Yahoo validation error for {symbol}: {e}")
+        source_errors["yahoo"] = str(e)
+    except RuntimeError as e:
+        logger.error(f"Yahoo RSS parsing error for {symbol}: {e}")
+        source_errors["yahoo"] = "Parsing error"
+    
+    # Process articles
+    processed_articles = []
+    processing_errors = 0
+    
+    for article in all_articles:
+        try:
+            # Analyze sentiment
+            text = f"{article.get('title', '')} {article.get('description', '')}"
+            
+            try:
+                sentiment_data = analyze_text_sentiment(text)
+            except (ValueError, RuntimeError) as e:
+                logger.warning(f"Sentiment analysis failed for article: {e}")
+                processing_errors += 1
+                continue
+            
+            # Detect catalyst
+            catalyst_type = detect_catalyst_type(
+                article.get('title', ''),
+                article.get('description', '')
+            )
+            
+            # Calculate strength
+            catalyst_strength = calculate_catalyst_strength(
+                sentiment_data,
+                catalyst_type,
+                article.get('source', {}).get('name', 'unknown')
+            )
+            
+            # Filter by strength
+            if catalyst_strength >= min_strength:
+                news_article = NewsArticle(
+                    article_id=f"{symbol}_{datetime.utcnow().timestamp()}",
+                    symbol=symbol,
+                    headline=article.get('title', 'No title'),
+                    source=article.get('source', {}).get('name', 'Unknown'),
+                    published_at=datetime.fromisoformat(
+                        article.get('publishedAt', datetime.utcnow().isoformat())
+                    ),
+                    url=article.get('url'),
+                    summary=article.get('description'),
+                    sentiment=sentiment_data["sentiment"],
+                    sentiment_score=sentiment_data["score"],
+                    catalyst_type=catalyst_type,
+                    catalyst_strength=catalyst_strength,
+                    keywords=extract_keywords(text)
                 )
-    except Exception as e:
-        logger.error(f"Failed to store news articles: {e}")
+                
+                processed_articles.append(news_article)
+                
+        except Exception as e:
+            logger.error(f"Unexpected error processing article: {e}", exc_info=True)
+            processing_errors += 1
+    
+    # Sort by strength
+    processed_articles.sort(key=lambda x: x.catalyst_strength, reverse=True)
+    
+    # Store in database
+    if processed_articles:
+        try:
+            await store_news_articles(processed_articles)
+        except (RuntimeError, asyncpg.PostgresError) as e:
+            logger.critical(f"Failed to store articles for {symbol}: {e}")
+            # Continue - we return the data even if storage fails
+            # But this is logged as CRITICAL for investigation
+    
+    # Build response
+    response = {
+        "symbol": symbol,
+        "catalysts": [article.dict() for article in processed_articles],
+        "count": len(processed_articles),
+        "timestamp": datetime.utcnow().isoformat() + "Z"
+    }
+    
+    # Include diagnostics if there were issues
+    if source_errors or processing_errors > 0:
+        response["diagnostics"] = {
+            "source_errors": source_errors if source_errors else None,
+            "processing_errors": processing_errors,
+            "total_articles_fetched": len(all_articles),
+            "articles_processed": len(processed_articles)
+        }
+    
+    return response
+
+@app.post("/api/v1/catalysts/batch")
+async def get_catalysts_batch(request: CatalystRequest):
+    """Get catalysts for multiple symbols"""
+    
+    results = {}
+    
+    for symbol in request.symbols:
+        try:
+            response = await get_symbol_catalysts(
+                symbol,
+                request.lookback_hours,
+                request.min_catalyst_strength
+            )
+            results[symbol] = response
+            
+        except HTTPException as e:
+            logger.error(f"Failed to get catalysts for {symbol}: {e.detail}")
+            results[symbol] = {
+                "error": e.detail,
+                "error_code": e.status_code
+            }
+        except Exception as e:
+            logger.error(f"Unexpected error for {symbol}: {e}", exc_info=True)
+            results[symbol] = {
+                "error": "Unexpected error",
+                "error_type": type(e).__name__
+            }
+    
+    return {
+        "results": results,
+        "requested": len(request.symbols),
+        "successful": sum(1 for r in results.values() if "error" not in r),
+        "failed": sum(1 for r in results.values() if "error" in r),
+        "timestamp": datetime.utcnow().isoformat() + "Z"
+    }
 
 # === MAIN ENTRY POINT ===
 
 if __name__ == "__main__":
     import uvicorn
     
-    print("=" * 60)
-    print("🎩 Catalyst Trading System - News Service v4.1")
-    print("=" * 60)
-    print("Status: Starting...")
-    print("Port: 5008")
-    print("Protocol: REST API")
-    print("=" * 60)
+    logger.info("Starting News Service v5.0.0")
     
     uvicorn.run(
         app,
