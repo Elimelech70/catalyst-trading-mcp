@@ -38,33 +38,27 @@ services:
       retries: 5
 
   # News Service ONLY
+
   news:
     build:
       context: ./services/news
       dockerfile: Dockerfile
     container_name: catalyst-news
     environment:
-      DATABASE_URL: ${DATABASE_URL}  # ← Use the .env value
+      DATABASE_URL: ${DATABASE_URL}
       NEWS_API_KEY: ${NEWS_API_KEY}
-      BENZINGA_API_KEY: ${BENZINGA_API_KEY:-}
     ports:
       - "5008:5008"
     volumes:
-      - ./services/news:/app
+      - ./services/news/config:/app/config:ro  # Read-only config mount
       - news_logs:/app/logs
     networks:
       - catalyst-network
-    depends_on:
-      redis:
-        condition: service_healthy
     restart: unless-stopped
 
 volumes:
-  postgres_data:
-  redis_data:
   news_logs:
 
 networks:
   catalyst-network:
     driver: bridge
-
