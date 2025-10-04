@@ -1,0 +1,150 @@
+# Ticker to Company Name Mappings
+# File: services/news/config/ticker_mappings.yaml
+# Version: 1.0.0
+# Last Updated: 2025-10-04
+#
+# Purpose: Map stock tickers to company names for NewsAPI queries
+# NewsAPI works better with company names than tickers
+#
+# Maintenance:
+# - Add new tickers as needed
+# - Update company names if they change (e.g., Facebook → Meta)
+# - No code changes required - just update this file and restart service
+#
+# Format:
+#   TICKER: "Company Name or Search Terms"
+#
+# Tips:
+# - Use official company names
+# - Include common aliases (e.g., "Meta Facebook")
+# - For ETFs, include the ticker in the name
+# - Test queries at: https://newsapi.org/v2/everything?q=YOUR_SEARCH&apiKey=...
+
+# === MAJOR TECH ===
+AAPL: "Apple Inc"
+MSFT: "Microsoft"
+GOOGL: "Google Alphabet"
+GOOG: "Google Alphabet"
+META: "Meta Facebook"
+AMZN: "Amazon"
+NVDA: "NVIDIA"
+TSLA: "Tesla"
+AMD: "AMD Advanced Micro Devices"
+INTC: "Intel"
+CRM: "Salesforce"
+ORCL: "Oracle"
+ADBE: "Adobe"
+PYPL: "PayPal"
+SQ: "Block Square"
+SHOP: "Shopify"
+UBER: "Uber Technologies"
+LYFT: "Lyft"
+ABNB: "Airbnb"
+DASH: "DoorDash"
+
+# === FINANCE ===
+JPM: "JPMorgan Chase"
+BAC: "Bank of America"
+WFC: "Wells Fargo"
+GS: "Goldman Sachs"
+MS: "Morgan Stanley"
+C: "Citigroup"
+USB: "US Bank"
+PNC: "PNC Bank"
+BLK: "BlackRock"
+SCHW: "Charles Schwab"
+AXP: "American Express"
+V: "Visa"
+MA: "Mastercard"
+
+# === HEALTHCARE & PHARMA ===
+JNJ: "Johnson Johnson"
+PFE: "Pfizer"
+MRNA: "Moderna"
+ABBV: "AbbVie"
+UNH: "UnitedHealth"
+CVS: "CVS Health"
+LLY: "Eli Lilly"
+BMY: "Bristol Myers Squibb"
+GILD: "Gilead Sciences"
+AMGN: "Amgen"
+
+# === CONSUMER & RETAIL ===
+WMT: "Walmart"
+HD: "Home Depot"
+NKE: "Nike"
+SBUX: "Starbucks"
+MCD: "McDonald's"
+COST: "Costco"
+TGT: "Target"
+LOW: "Lowe's"
+TJX: "TJ Maxx"
+
+# === COMMUNICATIONS & MEDIA ===
+T: "AT&T"
+VZ: "Verizon"
+NFLX: "Netflix"
+DIS: "Disney"
+CMCSA: "Comcast"
+PARA: "Paramount"
+WBD: "Warner Bros Discovery"
+
+# === ENERGY ===
+XOM: "Exxon Mobil"
+CVX: "Chevron"
+COP: "ConocoPhillips"
+SLB: "Schlumberger"
+EOG: "EOG Resources"
+OXY: "Occidental Petroleum"
+
+# === INDUSTRIALS ===
+BA: "Boeing"
+CAT: "Caterpillar"
+GE: "General Electric"
+HON: "Honeywell"
+UPS: "UPS United Parcel"
+FDX: "FedEx"
+
+# === AUTOMOTIVE ===
+F: "Ford Motor"
+GM: "General Motors"
+RIVN: "Rivian"
+LCID: "Lucid Motors"
+NIO: "NIO Electric Vehicle"
+
+# === ETFS & INDICES ===
+SPY: "S&P 500 ETF SPY"
+QQQ: "NASDAQ 100 ETF QQQ"
+IWM: "Russell 2000 ETF IWM"
+DIA: "Dow Jones ETF DIA"
+VTI: "Vanguard Total Market ETF"
+
+# === POPULAR TRADING STOCKS ===
+COIN: "Coinbase"
+PLTR: "Palantir"
+SOFI: "SoFi"
+HOOD: "Robinhood"
+RBLX: "Roblox"
+U: "Unity Software"
+SNAP: "Snap Snapchat"
+PINS: "Pinterest"
+TWTR: "Twitter X"
+
+# === SEMICONDUCTORS ===
+TSM: "Taiwan Semiconductor TSMC"
+AVGO: "Broadcom"
+QCOM: "Qualcomm"
+TXN: "Texas Instruments"
+MU: "Micron Technology"
+AMAT: "Applied Materials"
+
+# === AEROSPACE & DEFENSE ===
+LMT: "Lockheed Martin"
+RTX: "Raytheon Technologies"
+NOC: "Northrop Grumman"
+GD: "General Dynamics"
+
+# === FALLBACK STRATEGY ===
+# If ticker not found in this map, service will use: "{TICKER} stock"
+# Example: "UNKNOWN" → "UNKNOWN stock"
+# This catches new IPOs and uncommon tickers automatically
