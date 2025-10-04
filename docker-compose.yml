@@ -44,9 +44,9 @@ services:
       dockerfile: Dockerfile
     container_name: catalyst-news
     environment:
-      DATABASE_URL: postgresql://catalyst:${DB_PASSWORD}@postgres:5432/catalyst_trading
+      DATABASE_URL: ${DATABASE_URL}  # ← Use the .env value
       NEWS_API_KEY: ${NEWS_API_KEY}
-      BENZINGA_API_KEY: ${BENZINGA_API_KEY}
+      BENZINGA_API_KEY: ${BENZINGA_API_KEY:-}
     ports:
       - "5008:5008"
     volumes:
@@ -55,8 +55,6 @@ services:
     networks:
       - catalyst-network
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
     restart: unless-stopped
