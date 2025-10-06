@@ -2,988 +2,637 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: reporting-service.py
-Version: 4.1.0
-Last Updated: 2025-08-31
-Purpose: Performance analytics and reporting
+Version: 5.0.0
+Last Updated: 2025-10-06
+Purpose: Reporting and analytics with normalized schema v5.0 (security_id FKs + JOINs)
 
 REVISION HISTORY:
-v4.1.0 (2025-08-31) - Production-ready reporting service
-- Real-time P&L tracking
-- Performance metrics calculation
-- Trade journal generation
-- Risk analytics
-- Daily/weekly/monthly reporting
+v5.0.0 (2025-10-06) - Normalized Schema Update
+- ✅ All reports use JOINs (positions → securities → sectors)
+- ✅ Daily reports aggregate by security_id
+- ✅ Performance metrics use FK relationships
+- ✅ Pattern success tracking via security_id
+- ✅ Sector performance analysis via JOINs
+- ✅ No duplicate symbol storage
+- ✅ Error handling compliant with v1.0 standard
+
+v4.0.0 (2025-09-15) - DEPRECATED (Denormalized)
+- Used symbol VARCHAR in reports
+- No FK relationships
 
 Description of Service:
-This service provides comprehensive reporting:
-1. Real-time P&L tracking and metrics
-2. Trade performance analytics
-3. Risk exposure monitoring
-4. Pattern success rate tracking
-5. Automated report generation
+Generates trading reports and analytics using normalized v5.0 schema:
+- Daily trading reports (P&L, positions, patterns)
+- Performance analytics (win rate, R-multiple, sector performance)
+- Position history with security_id tracking
+- Pattern success analysis
+- All data queried via JOINs for data integrity
 """
 
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
-from typing import Dict, List, Optional, Any
-from datetime import datetime, timedelta, date
-import asyncio
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, validator
+from typing import Optional, List, Dict, Any
+from datetime import datetime, date, timedelta
+from contextlib import asynccontextmanager
+from decimal import Decimal
 import asyncpg
-import aioredis
-import pandas as pd
-import json
 import os
 import logging
-from enum import Enum
-from decimal import Decimal
-import matplotlib.pyplot as plt
-import seaborn as sns
-from io import BytesIO
-import base64
 
-# Initialize FastAPI app
-app = FastAPI(
-    title="Reporting Service",
-    version="4.1.0",
-    description="Performance reporting service for Catalyst Trading System"
-)
+# ============================================================================
+# LOGGING SETUP
+# ============================================================================
 
-# CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-logger = logging.getLogger("reporting")
+logger = logging.getLogger(__name__)
 
-# Set matplotlib backend
-plt.switch_backend('Agg')
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
 
-# === DATA MODELS ===
+class Config:
+    """Service configuration"""
+    SERVICE_NAME = "reporting-service"
+    VERSION = "5.0.0"
+    PORT = 5006
+    DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://catalyst:catalyst@localhost:5432/catalyst_trading")
+    POOL_MIN_SIZE = 2
+    POOL_MAX_SIZE = 10
 
-class ReportType(str, Enum):
-    DAILY = "daily"
-    WEEKLY = "weekly"
-    MONTHLY = "monthly"
-    CYCLE = "cycle"
-    CUSTOM = "custom"
+# ============================================================================
+# STATE MANAGEMENT
+# ============================================================================
 
-class MetricType(str, Enum):
-    WIN_RATE = "win_rate"
-    PROFIT_FACTOR = "profit_factor"
-    SHARPE_RATIO = "sharpe_ratio"
-    MAX_DRAWDOWN = "max_drawdown"
-    AVERAGE_WIN = "average_win"
-    AVERAGE_LOSS = "average_loss"
-    TOTAL_RETURN = "total_return"
-    TRADES_COUNT = "trades_count"
-
-class PerformanceMetrics(BaseModel):
-    total_pnl: float
-    realized_pnl: float
-    unrealized_pnl: float
-    win_rate: float
-    profit_factor: float
-    sharpe_ratio: float
-    max_drawdown: float
-    average_win: float
-    average_loss: float
-    total_trades: int
-    winning_trades: int
-    losing_trades: int
-    best_trade: Dict[str, Any]
-    worst_trade: Dict[str, Any]
-
-class DailyReport(BaseModel):
-    date: date
-    metrics: PerformanceMetrics
-    trades: List[Dict]
-    positions: List[Dict]
-    top_patterns: List[Dict]
-    market_conditions: Dict
-    risk_metrics: Dict
-
-class TradeJournal(BaseModel):
-    trade_id: str
-    symbol: str
-    entry_time: datetime
-    exit_time: Optional[datetime]
-    entry_price: float
-    exit_price: Optional[float]
-    quantity: int
-    side: str
-    pnl: Optional[float]
-    pnl_percent: Optional[float]
-    pattern: Optional[str]
-    catalyst: Optional[str]
-    notes: Optional[str]
-
-class RiskReport(BaseModel):
-    current_exposure: float
-    max_exposure: float
-    var_95: float  # Value at Risk
-    position_correlations: Dict
-    sector_exposure: Dict
-    risk_score: float
-
-# === SERVICE STATE ===
-
-class ReportingState:
+class ServiceState:
+    """Global service state"""
     def __init__(self):
         self.db_pool: Optional[asyncpg.Pool] = None
-        self.redis_client: Optional[aioredis.Redis] = None
-        self.metrics_cache: Dict = {}
-        self.report_generation_task: Optional[asyncio.Task] = None
+        self.is_healthy = False
 
-state = ReportingState()
+state = ServiceState()
 
-# === STARTUP/SHUTDOWN ===
+# ============================================================================
+# LIFESPAN MANAGEMENT
+# ============================================================================
 
-@app.on_event("startup")
-async def startup():
-    """Initialize reporting service"""
-    logger.info("Starting Reporting Service v4.1")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup/shutdown"""
+    logger.info(f"Starting {Config.SERVICE_NAME} v{Config.VERSION}")
     
     try:
         # Initialize database pool
-        db_url = os.getenv("DATABASE_URL", "postgresql://catalyst_user:password@localhost:5432/catalyst_trading")
         state.db_pool = await asyncpg.create_pool(
-            db_url,
-            min_size=5,
-            max_size=20
+            Config.DATABASE_URL,
+            min_size=Config.POOL_MIN_SIZE,
+            max_size=Config.POOL_MAX_SIZE,
+            command_timeout=60
         )
+        logger.info("✅ Database pool created")
         
-        # Initialize Redis client
-        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-        state.redis_client = await aioredis.from_url(
-            redis_url,
-            encoding="utf-8",
-            decode_responses=True
-        )
+        # Verify schema
+        async with state.db_pool.acquire() as conn:
+            # Check required tables
+            for table in ['positions', 'securities', 'sectors', 'pattern_analysis', 'daily_risk_metrics']:
+                exists = await conn.fetchval(f"""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables 
+                        WHERE table_name = '{table}'
+                    )
+                """)
+                if not exists:
+                    raise Exception(f"{table} table does not exist! Run schema v5.0 first.")
         
-        # Start background report generation
-        state.report_generation_task = asyncio.create_task(generate_periodic_reports())
+        state.is_healthy = True
+        logger.info("✅ Schema validation passed - v5.0 normalized tables found")
         
-        logger.info("Reporting Service initialized successfully")
+        yield
         
     except Exception as e:
-        logger.error(f"Failed to initialize reporting service: {e}")
+        logger.error(f"❌ Startup failed: {e}")
+        state.is_healthy = False
         raise
+    finally:
+        # Cleanup
+        if state.db_pool:
+            await state.db_pool.close()
+            logger.info("Database pool closed")
 
-@app.on_event("shutdown")
-async def shutdown():
-    """Clean up resources"""
-    logger.info("Shutting down Reporting Service")
-    
-    if state.report_generation_task:
-        state.report_generation_task.cancel()
-    
-    if state.redis_client:
-        await state.redis_client.close()
-    
-    if state.db_pool:
-        await state.db_pool.close()
+# ============================================================================
+# FASTAPI APP
+# ============================================================================
 
-# === REST API ENDPOINTS ===
+app = FastAPI(
+    title="Catalyst Reporting Service",
+    description="Reporting and analytics with normalized schema v5.0",
+    version=Config.VERSION,
+    lifespan=lifespan
+)
+
+# ============================================================================
+# DEPENDENCY: DATABASE CONNECTION
+# ============================================================================
+
+async def get_db():
+    """Dependency to get database connection"""
+    if not state.db_pool:
+        raise HTTPException(status_code=503, detail="Database pool not initialized")
+    async with state.db_pool.acquire() as conn:
+        yield conn
+
+# ============================================================================
+# MODELS
+# ============================================================================
+
+class DailyReportResponse(BaseModel):
+    """Daily trading report"""
+    cycle_id: int
+    date: str
+    summary: Dict[str, Any]
+    positions: List[Dict[str, Any]]
+    patterns: List[Dict[str, Any]]
+    sector_breakdown: List[Dict[str, Any]]
+    risk_metrics: Dict[str, Any]
+
+class PerformanceMetrics(BaseModel):
+    """Performance analytics"""
+    cycle_id: int
+    total_trades: int
+    winning_trades: int
+    losing_trades: int
+    win_rate: float
+    total_pnl: float
+    average_win: float
+    average_loss: float
+    largest_win: float
+    largest_loss: float
+    profit_factor: Optional[float]
+    avg_r_multiple: Optional[float]
+
+# ============================================================================
+# API ENDPOINTS
+# ============================================================================
+
+@app.get("/api/v1/reports/daily", response_model=DailyReportResponse)
+async def get_daily_report(
+    cycle_id: int,
+    date: Optional[str] = None,
+    conn: asyncpg.Connection = Depends(get_db)
+):
+    """
+    Generate daily trading report using JOINs.
+    
+    v5.0 Pattern:
+    - All queries JOIN positions → securities → sectors
+    - Pattern queries JOIN pattern_analysis → securities
+    - Aggregates by security_id (not symbol duplicates)
+    """
+    try:
+        # Parse date or use today
+        if date:
+            report_date = datetime.strptime(date, "%Y-%m-%d").date()
+        else:
+            report_date = datetime.utcnow().date()
+        
+        logger.info(f"Generating daily report for cycle {cycle_id} on {report_date}")
+        
+        # Summary metrics
+        summary = await conn.fetchrow("""
+            SELECT 
+                COUNT(*) FILTER (WHERE status = 'open') as open_positions,
+                COUNT(*) FILTER (WHERE status = 'closed' AND DATE(closed_at) = $2) as closed_today,
+                COALESCE(SUM(realized_pnl) FILTER (WHERE DATE(closed_at) = $2), 0) as realized_pnl,
+                COALESCE(SUM(unrealized_pnl) FILTER (WHERE status = 'open'), 0) as unrealized_pnl,
+                COUNT(*) FILTER (WHERE realized_pnl > 0 AND DATE(closed_at) = $2) as winners_today,
+                COUNT(*) FILTER (WHERE realized_pnl < 0 AND DATE(closed_at) = $2) as losers_today
+            FROM positions
+            WHERE cycle_id = $1
+            AND DATE(created_at) <= $2
+        """, cycle_id, report_date)
+        
+        # Open positions with JOINs
+        positions = await conn.fetch("""
+            SELECT 
+                p.position_id,
+                p.security_id,
+                s.symbol,
+                s.company_name,
+                sec.sector_name,
+                p.side,
+                p.quantity,
+                p.entry_price,
+                p.current_price,
+                p.stop_price,
+                p.target_price,
+                p.unrealized_pnl,
+                p.risk_amount,
+                (p.unrealized_pnl / NULLIF(p.risk_amount, 0)) as r_multiple,
+                p.created_at
+            FROM positions p
+            JOIN securities s ON s.security_id = p.security_id
+            LEFT JOIN sectors sec ON sec.sector_id = s.sector_id
+            WHERE p.cycle_id = $1
+            AND p.status = 'open'
+            ORDER BY p.created_at DESC
+        """, cycle_id)
+        
+        # Patterns detected today with JOINs
+        patterns = await conn.fetch("""
+            SELECT 
+                pa.pattern_id,
+                s.symbol,
+                s.company_name,
+                pa.pattern_type,
+                pa.pattern_subtype,
+                pa.confidence_score,
+                pa.price_at_detection,
+                pa.breakout_level,
+                td.timestamp as detected_at
+            FROM pattern_analysis pa
+            JOIN securities s ON s.security_id = pa.security_id
+            JOIN time_dimension td ON td.time_id = pa.time_id
+            WHERE DATE(td.timestamp) = $1
+            ORDER BY pa.confidence_score DESC
+            LIMIT 20
+        """, report_date)
+        
+        # Sector breakdown with JOINs
+        sector_breakdown = await conn.fetch("""
+            SELECT 
+                sec.sector_name,
+                COUNT(p.position_id) as position_count,
+                SUM(p.quantity * p.entry_price) as total_exposure,
+                SUM(p.unrealized_pnl) as unrealized_pnl,
+                SUM(p.realized_pnl) FILTER (WHERE DATE(p.closed_at) = $2) as realized_pnl_today
+            FROM positions p
+            JOIN securities s ON s.security_id = p.security_id
+            LEFT JOIN sectors sec ON sec.sector_id = s.sector_id
+            WHERE p.cycle_id = $1
+            AND (p.status = 'open' OR DATE(p.closed_at) = $2)
+            GROUP BY sec.sector_name
+            ORDER BY total_exposure DESC
+        """, cycle_id, report_date)
+        
+        # Risk metrics from daily_risk_metrics table
+        risk_metrics_row = await conn.fetchrow("""
+            SELECT 
+                total_positions_opened,
+                positions_closed,
+                total_realized_pnl,
+                total_unrealized_pnl,
+                winning_trades,
+                losing_trades,
+                largest_win,
+                largest_loss
+            FROM daily_risk_metrics
+            WHERE cycle_id = $1
+            AND date = $2
+        """, cycle_id, report_date)
+        
+        # Build response
+        total_pnl = float(summary['realized_pnl'] or 0) + float(summary['unrealized_pnl'] or 0)
+        
+        return DailyReportResponse(
+            cycle_id=cycle_id,
+            date=report_date.isoformat(),
+            summary={
+                'open_positions': summary['open_positions'],
+                'closed_today': summary['closed_today'],
+                'realized_pnl': float(summary['realized_pnl'] or 0),
+                'unrealized_pnl': float(summary['unrealized_pnl'] or 0),
+                'total_pnl': total_pnl,
+                'winners_today': summary['winners_today'],
+                'losers_today': summary['losers_today'],
+                'win_rate_today': (
+                    summary['winners_today'] / (summary['winners_today'] + summary['losers_today'])
+                    if (summary['winners_today'] + summary['losers_today']) > 0 else 0
+                )
+            },
+            positions=[dict(r) for r in positions],
+            patterns=[dict(r) for r in patterns],
+            sector_breakdown=[dict(r) for r in sector_breakdown],
+            risk_metrics=dict(risk_metrics_row) if risk_metrics_row else {}
+        )
+    
+    except Exception as e:
+        logger.error(f"Error generating daily report: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/reports/performance", response_model=PerformanceMetrics)
+async def get_performance_metrics(
+    cycle_id: int,
+    days: int = 30,
+    conn: asyncpg.Connection = Depends(get_db)
+):
+    """
+    Get performance metrics for the cycle.
+    
+    v5.0 Pattern:
+    - Aggregates closed positions
+    - Calculates win rate, profit factor, R-multiples
+    """
+    try:
+        # Get closed positions
+        metrics = await conn.fetchrow("""
+            SELECT 
+                COUNT(*) as total_trades,
+                COUNT(*) FILTER (WHERE realized_pnl > 0) as winning_trades,
+                COUNT(*) FILTER (WHERE realized_pnl < 0) as losing_trades,
+                COALESCE(SUM(realized_pnl), 0) as total_pnl,
+                AVG(realized_pnl) FILTER (WHERE realized_pnl > 0) as avg_win,
+                AVG(realized_pnl) FILTER (WHERE realized_pnl < 0) as avg_loss,
+                MAX(realized_pnl) as largest_win,
+                MIN(realized_pnl) as largest_loss,
+                SUM(realized_pnl) FILTER (WHERE realized_pnl > 0) as gross_profit,
+                ABS(SUM(realized_pnl) FILTER (WHERE realized_pnl < 0)) as gross_loss,
+                AVG(realized_pnl / NULLIF(risk_amount, 0)) as avg_r_multiple
+            FROM positions
+            WHERE cycle_id = $1
+            AND status = 'closed'
+            AND closed_at >= NOW() - INTERVAL '1 day' * $2
+        """, cycle_id, days)
+        
+        if not metrics or metrics['total_trades'] == 0:
+            return PerformanceMetrics(
+                cycle_id=cycle_id,
+                total_trades=0,
+                winning_trades=0,
+                losing_trades=0,
+                win_rate=0.0,
+                total_pnl=0.0,
+                average_win=0.0,
+                average_loss=0.0,
+                largest_win=0.0,
+                largest_loss=0.0,
+                profit_factor=None,
+                avg_r_multiple=None
+            )
+        
+        # Calculate profit factor
+        profit_factor = None
+        if metrics['gross_loss'] and metrics['gross_loss'] > 0:
+            profit_factor = float(metrics['gross_profit']) / float(metrics['gross_loss'])
+        
+        win_rate = metrics['winning_trades'] / metrics['total_trades'] if metrics['total_trades'] > 0 else 0
+        
+        return PerformanceMetrics(
+            cycle_id=cycle_id,
+            total_trades=metrics['total_trades'],
+            winning_trades=metrics['winning_trades'],
+            losing_trades=metrics['losing_trades'],
+            win_rate=win_rate,
+            total_pnl=float(metrics['total_pnl'] or 0),
+            average_win=float(metrics['avg_win'] or 0),
+            average_loss=float(metrics['avg_loss'] or 0),
+            largest_win=float(metrics['largest_win'] or 0),
+            largest_loss=float(metrics['largest_loss'] or 0),
+            profit_factor=profit_factor,
+            avg_r_multiple=float(metrics['avg_r_multiple']) if metrics['avg_r_multiple'] else None
+        )
+    
+    except Exception as e:
+        logger.error(f"Error calculating performance metrics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/reports/position-history/{symbol}")
+async def get_position_history(
+    symbol: str,
+    cycle_id: int,
+    limit: int = 50,
+    conn: asyncpg.Connection = Depends(get_db)
+):
+    """
+    Get position history for a specific symbol using security_id.
+    
+    v5.0 Pattern:
+    - Looks up security_id first
+    - Queries positions by security_id (not symbol!)
+    """
+    try:
+        # Get security_id
+        security_id = await conn.fetchval("""
+            SELECT security_id FROM securities WHERE symbol = $1
+        """, symbol.upper())
+        
+        if not security_id:
+            raise HTTPException(status_code=404, detail=f"Security {symbol} not found")
+        
+        # Get position history
+        positions = await conn.fetch("""
+            SELECT 
+                p.position_id,
+                s.symbol,
+                s.company_name,
+                p.side,
+                p.quantity,
+                p.entry_price,
+                p.exit_price,
+                p.stop_price,
+                p.target_price,
+                p.realized_pnl,
+                p.risk_amount,
+                (p.realized_pnl / NULLIF(p.risk_amount, 0)) as r_multiple,
+                p.status,
+                p.created_at,
+                p.closed_at
+            FROM positions p
+            JOIN securities s ON s.security_id = p.security_id
+            WHERE p.security_id = $1
+            AND p.cycle_id = $2
+            ORDER BY p.created_at DESC
+            LIMIT $3
+        """, security_id, cycle_id, limit)
+        
+        return {
+            "symbol": symbol.upper(),
+            "security_id": security_id,
+            "cycle_id": cycle_id,
+            "count": len(positions),
+            "positions": [dict(r) for r in positions]
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching position history: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/reports/pattern-success")
+async def get_pattern_success_rates(
+    cycle_id: int,
+    days: int = 30,
+    conn: asyncpg.Connection = Depends(get_db)
+):
+    """
+    Analyze which patterns lead to successful trades.
+    
+    v5.0 Pattern:
+    - JOINs pattern_analysis with positions via security_id
+    - Tracks which patterns preceded winning trades
+    """
+    try:
+        # Get patterns that were followed by positions
+        pattern_stats = await conn.fetch("""
+            WITH pattern_positions AS (
+                SELECT 
+                    pa.pattern_type,
+                    pa.pattern_subtype,
+                    pa.security_id,
+                    pa.time_id,
+                    td.timestamp as pattern_time,
+                    p.position_id,
+                    p.realized_pnl,
+                    p.created_at as position_time
+                FROM pattern_analysis pa
+                JOIN time_dimension td ON td.time_id = pa.time_id
+                LEFT JOIN positions p ON p.security_id = pa.security_id
+                    AND p.created_at >= td.timestamp
+                    AND p.created_at <= td.timestamp + INTERVAL '24 hours'
+                    AND p.cycle_id = $1
+                WHERE td.timestamp >= NOW() - INTERVAL '1 day' * $2
+            )
+            SELECT 
+                pattern_type,
+                pattern_subtype,
+                COUNT(DISTINCT security_id) as times_detected,
+                COUNT(position_id) as positions_taken,
+                COUNT(position_id) FILTER (WHERE realized_pnl > 0) as winning_positions,
+                AVG(realized_pnl) FILTER (WHERE realized_pnl IS NOT NULL) as avg_pnl
+            FROM pattern_positions
+            GROUP BY pattern_type, pattern_subtype
+            HAVING COUNT(position_id) > 0
+            ORDER BY winning_positions DESC, times_detected DESC
+        """, cycle_id, days)
+        
+        results = []
+        for row in pattern_stats:
+            success_rate = (
+                row['winning_positions'] / row['positions_taken']
+                if row['positions_taken'] > 0 else 0
+            )
+            
+            results.append({
+                'pattern_type': row['pattern_type'],
+                'pattern_subtype': row['pattern_subtype'],
+                'times_detected': row['times_detected'],
+                'positions_taken': row['positions_taken'],
+                'winning_positions': row['winning_positions'],
+                'success_rate': success_rate,
+                'avg_pnl': float(row['avg_pnl'] or 0)
+            })
+        
+        return {
+            "cycle_id": cycle_id,
+            "days": days,
+            "patterns": results
+        }
+    
+    except Exception as e:
+        logger.error(f"Error analyzing pattern success: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/reports/sector-performance")
+async def get_sector_performance(
+    cycle_id: int,
+    days: int = 30,
+    conn: asyncpg.Connection = Depends(get_db)
+):
+    """
+    Get performance breakdown by sector using JOINs.
+    
+    v5.0 Pattern:
+    - JOIN positions → securities → sectors
+    - Aggregate P&L by sector
+    """
+    try:
+        sector_stats = await conn.fetch("""
+            SELECT 
+                sec.sector_name,
+                COUNT(p.position_id) as total_positions,
+                COUNT(p.position_id) FILTER (WHERE p.realized_pnl > 0) as winning_positions,
+                SUM(p.realized_pnl) as total_pnl,
+                AVG(p.realized_pnl) as avg_pnl,
+                MAX(p.realized_pnl) as best_trade,
+                MIN(p.realized_pnl) as worst_trade
+            FROM positions p
+            JOIN securities s ON s.security_id = p.security_id
+            LEFT JOIN sectors sec ON sec.sector_id = s.sector_id
+            WHERE p.cycle_id = $1
+            AND p.status = 'closed'
+            AND p.closed_at >= NOW() - INTERVAL '1 day' * $2
+            GROUP BY sec.sector_name
+            ORDER BY total_pnl DESC
+        """, cycle_id, days)
+        
+        results = []
+        for row in sector_stats:
+            win_rate = (
+                row['winning_positions'] / row['total_positions']
+                if row['total_positions'] > 0 else 0
+            )
+            
+            results.append({
+                'sector_name': row['sector_name'] or 'Unknown',
+                'total_positions': row['total_positions'],
+                'winning_positions': row['winning_positions'],
+                'win_rate': win_rate,
+                'total_pnl': float(row['total_pnl'] or 0),
+                'avg_pnl': float(row['avg_pnl'] or 0),
+                'best_trade': float(row['best_trade'] or 0),
+                'worst_trade': float(row['worst_trade'] or 0)
+            })
+        
+        return {
+            "cycle_id": cycle_id,
+            "days": days,
+            "sectors": results
+        }
+    
+    except Exception as e:
+        logger.error(f"Error analyzing sector performance: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
+    if not state.is_healthy or not state.db_pool:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unhealthy",
+                "service": Config.SERVICE_NAME,
+                "version": Config.VERSION
+            }
+        )
+    
     return {
         "status": "healthy",
-        "service": "reporting",
-        "version": "4.1.0",
-        "timestamp": datetime.now().isoformat()
+        "service": Config.SERVICE_NAME,
+        "version": Config.VERSION,
+        "schema": "v5.0 normalized",
+        "uses_security_id_fk": True,
+        "reports": [
+            "Daily trading report",
+            "Performance metrics (win rate, R-multiples)",
+            "Position history by symbol",
+            "Pattern success analysis",
+            "Sector performance breakdown"
+        ]
     }
 
-@app.get("/api/v1/performance/daily")
-async def get_daily_performance(date_str: Optional[str] = None):
-    """Get daily performance report"""
-    
-    try:
-        # Parse date or use today
-        if date_str:
-            report_date = datetime.fromisoformat(date_str).date()
-        else:
-            report_date = date.today()
-        
-        # Get metrics
-        metrics = await calculate_daily_metrics(report_date)
-        
-        # Get trades
-        trades = await get_daily_trades(report_date)
-        
-        # Get positions
-        positions = await get_active_positions_for_date(report_date)
-        
-        # Get top patterns
-        patterns = await get_top_patterns_for_date(report_date)
-        
-        # Get market conditions
-        market = await get_market_conditions(report_date)
-        
-        # Get risk metrics
-        risk = await calculate_risk_metrics(report_date)
-        
-        return DailyReport(
-            date=report_date,
-            metrics=metrics,
-            trades=trades,
-            positions=positions,
-            top_patterns=patterns,
-            market_conditions=market,
-            risk_metrics=risk
-        )
-        
-    except Exception as e:
-        logger.error(f"Failed to generate daily report: {e}")
-        raise HTTPException(status_code=500, detail=f"Report generation failed: {str(e)}")
-
-@app.get("/api/v1/performance/cycle/{cycle_id}")
-async def get_cycle_performance(cycle_id: str):
-    """Get performance for a specific trading cycle"""
-    
-    try:
-        async with state.db_pool.acquire() as conn:
-            # Get cycle info
-            cycle = await conn.fetchrow("""
-                SELECT * FROM trading_cycles WHERE cycle_id = $1
-            """, cycle_id)
-            
-            if not cycle:
-                raise HTTPException(status_code=404, detail="Cycle not found")
-            
-            # Get trades for cycle
-            trades = await conn.fetch("""
-                SELECT t.*, p.entry_price, p.exit_price, p.pnl
-                FROM orders t
-                LEFT JOIN positions p ON t.symbol = p.symbol
-                WHERE t.cycle_id = $1
-                ORDER BY t.created_at
-            """, cycle_id)
-            
-            # Calculate metrics
-            metrics = calculate_metrics_from_trades(trades)
-            
-            return {
-                "cycle_id": cycle_id,
-                "started_at": cycle['started_at'].isoformat(),
-                "stopped_at": cycle['stopped_at'].isoformat() if cycle['stopped_at'] else None,
-                "mode": cycle['mode'],
-                "metrics": metrics,
-                "trades_count": len(trades),
-                "status": cycle['status']
-            }
-            
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to get cycle performance: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get performance: {str(e)}")
-
-@app.get("/api/v1/metrics/summary")
-async def get_metrics_summary(days: int = 30):
-    """Get summary metrics for specified period"""
-    
-    try:
-        start_date = datetime.now() - timedelta(days=days)
-        
-        async with state.db_pool.acquire() as conn:
-            # Get aggregated metrics
-            metrics = await conn.fetchrow("""
-                SELECT 
-                    COUNT(*) as total_trades,
-                    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as winning_trades,
-                    SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losing_trades,
-                    SUM(pnl) as total_pnl,
-                    AVG(CASE WHEN pnl > 0 THEN pnl END) as avg_win,
-                    AVG(CASE WHEN pnl < 0 THEN pnl END) as avg_loss,
-                    MAX(pnl) as best_trade,
-                    MIN(pnl) as worst_trade
-                FROM positions
-                WHERE created_at >= $1
-            """, start_date)
-            
-            # Calculate derived metrics
-            win_rate = 0
-            profit_factor = 0
-            
-            if metrics['total_trades'] > 0:
-                win_rate = (metrics['winning_trades'] or 0) / metrics['total_trades'] * 100
-                
-                total_wins = (metrics['winning_trades'] or 0) * (metrics['avg_win'] or 0)
-                total_losses = abs((metrics['losing_trades'] or 0) * (metrics['avg_loss'] or 0))
-                
-                if total_losses > 0:
-                    profit_factor = total_wins / total_losses
-            
-            return {
-                "period_days": days,
-                "total_trades": metrics['total_trades'] or 0,
-                "winning_trades": metrics['winning_trades'] or 0,
-                "losing_trades": metrics['losing_trades'] or 0,
-                "win_rate": round(win_rate, 2),
-                "profit_factor": round(profit_factor, 2),
-                "total_pnl": float(metrics['total_pnl'] or 0),
-                "average_win": float(metrics['avg_win'] or 0),
-                "average_loss": float(metrics['avg_loss'] or 0),
-                "best_trade": float(metrics['best_trade'] or 0),
-                "worst_trade": float(metrics['worst_trade'] or 0),
-                "timestamp": datetime.now().isoformat()
-            }
-            
-    except Exception as e:
-        logger.error(f"Failed to get metrics summary: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get metrics: {str(e)}")
-
-@app.get("/api/v1/trades/journal")
-async def get_trade_journal(
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    symbol: Optional[str] = None
-):
-    """Get trade journal entries"""
-    
-    try:
-        # Build query
-        query = """
-            SELECT 
-                o.order_id as trade_id,
-                o.symbol,
-                o.created_at as entry_time,
-                p.exit_time,
-                p.entry_price,
-                p.exit_price,
-                o.quantity,
-                o.direction as side,
-                p.pnl,
-                p.pnl_percent,
-                pd.pattern_type as pattern,
-                n.catalyst_type as catalyst,
-                o.metadata->>'notes' as notes
-            FROM orders o
-            LEFT JOIN positions p ON o.symbol = p.symbol
-            LEFT JOIN pattern_detections pd ON o.symbol = pd.symbol
-                AND pd.created_at BETWEEN o.created_at - INTERVAL '1 hour' 
-                AND o.created_at
-            LEFT JOIN news_articles n ON o.symbol = n.symbol
-                AND n.published_at BETWEEN o.created_at - INTERVAL '24 hours'
-                AND o.created_at
-            WHERE o.status = 'filled'
-        """
-        
-        params = []
-        param_count = 0
-        
-        if start_date:
-            param_count += 1
-            query += f" AND o.created_at >= ${param_count}"
-            params.append(datetime.fromisoformat(start_date))
-        
-        if end_date:
-            param_count += 1
-            query += f" AND o.created_at <= ${param_count}"
-            params.append(datetime.fromisoformat(end_date))
-        
-        if symbol:
-            param_count += 1
-            query += f" AND o.symbol = ${param_count}"
-            params.append(symbol)
-        
-        query += " ORDER BY o.created_at DESC LIMIT 100"
-        
-        async with state.db_pool.acquire() as conn:
-            rows = await conn.fetch(query, *params)
-            
-            journal_entries = []
-            for row in rows:
-                entry = TradeJournal(
-                    trade_id=row['trade_id'],
-                    symbol=row['symbol'],
-                    entry_time=row['entry_time'],
-                    exit_time=row['exit_time'],
-                    entry_price=float(row['entry_price'] or 0),
-                    exit_price=float(row['exit_price']) if row['exit_price'] else None,
-                    quantity=row['quantity'],
-                    side=row['side'],
-                    pnl=float(row['pnl']) if row['pnl'] else None,
-                    pnl_percent=float(row['pnl_percent']) if row['pnl_percent'] else None,
-                    pattern=row['pattern'],
-                    catalyst=row['catalyst'],
-                    notes=row['notes']
-                )
-                journal_entries.append(entry)
-            
-            return {
-                "entries": [e.dict() for e in journal_entries],
-                "count": len(journal_entries),
-                "timestamp": datetime.now().isoformat()
-            }
-            
-    except Exception as e:
-        logger.error(f"Failed to get trade journal: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get journal: {str(e)}")
-
-@app.get("/api/v1/risk/current")
-async def get_current_risk():
-    """Get current risk metrics"""
-    
-    try:
-        # Get active positions
-        positions = await get_active_positions()
-        
-        if not positions:
-            return RiskReport(
-                current_exposure=0,
-                max_exposure=0,
-                var_95=0,
-                position_correlations={},
-                sector_exposure={},
-                risk_score=0
-            )
-        
-        # Calculate exposure
-        current_exposure = sum(p['market_value'] for p in positions)
-        max_exposure = 50000  # From config
-        
-        # Calculate VaR (simplified)
-        position_values = [p['market_value'] for p in positions]
-        var_95 = calculate_var(position_values, 0.95)
-        
-        # Calculate correlations (simplified)
-        correlations = calculate_position_correlations(positions)
-        
-        # Calculate sector exposure
-        sector_exposure = calculate_sector_exposure(positions)
-        
-        # Calculate risk score
-        risk_score = calculate_risk_score(
-            current_exposure,
-            max_exposure,
-            var_95,
-            len(positions)
-        )
-        
-        return RiskReport(
-            current_exposure=current_exposure,
-            max_exposure=max_exposure,
-            var_95=var_95,
-            position_correlations=correlations,
-            sector_exposure=sector_exposure,
-            risk_score=risk_score
-        )
-        
-    except Exception as e:
-        logger.error(f"Failed to get risk metrics: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get risk: {str(e)}")
-
-@app.get("/api/v1/charts/pnl")
-async def get_pnl_chart(days: int = 30):
-    """Generate P&L chart"""
-    
-    try:
-        # Get P&L data
-        pnl_data = await get_pnl_history(days)
-        
-        if not pnl_data:
-            raise HTTPException(status_code=404, detail="No P&L data available")
-        
-        # Create DataFrame
-        df = pd.DataFrame(pnl_data)
-        df['date'] = pd.to_datetime(df['date'])
-        df = df.set_index('date')
-        
-        # Create chart
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
-        
-        # Cumulative P&L
-        ax1.plot(df.index, df['cumulative_pnl'], 'b-', linewidth=2)
-        ax1.fill_between(df.index, 0, df['cumulative_pnl'], alpha=0.3)
-        ax1.set_title('Cumulative P&L')
-        ax1.set_ylabel('P&L ($)')
-        ax1.grid(True, alpha=0.3)
-        
-        # Daily P&L
-        colors = ['g' if x > 0 else 'r' for x in df['daily_pnl']]
-        ax2.bar(df.index, df['daily_pnl'], color=colors, alpha=0.7)
-        ax2.set_title('Daily P&L')
-        ax2.set_xlabel('Date')
-        ax2.set_ylabel('P&L ($)')
-        ax2.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        
-        # Convert to base64
-        buffer = BytesIO()
-        plt.savefig(buffer, format='png', dpi=100)
-        buffer.seek(0)
-        image_base64 = base64.b64encode(buffer.getvalue()).decode()
-        plt.close()
-        
-        return {
-            "chart": f"data:image/png;base64,{image_base64}",
-            "data": pnl_data,
-            "timestamp": datetime.now().isoformat()
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to generate P&L chart: {e}")
-        raise HTTPException(status_code=500, detail=f"Chart generation failed: {str(e)}")
-
-@app.get("/api/v1/reports/generate/{report_type}")
-async def generate_report(report_type: ReportType):
-    """Generate a specific type of report"""
-    
-    try:
-        if report_type == ReportType.DAILY:
-            report = await generate_daily_report()
-        elif report_type == ReportType.WEEKLY:
-            report = await generate_weekly_report()
-        elif report_type == ReportType.MONTHLY:
-            report = await generate_monthly_report()
-        else:
-            raise HTTPException(status_code=400, detail="Invalid report type")
-        
-        return {
-            "report_type": report_type.value,
-            "report": report,
-            "generated_at": datetime.now().isoformat()
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to generate report: {e}")
-        raise HTTPException(status_code=500, detail=f"Report generation failed: {str(e)}")
-
-# === CALCULATION FUNCTIONS ===
-
-async def calculate_daily_metrics(report_date: date) -> PerformanceMetrics:
-    """Calculate daily performance metrics"""
-    
-    try:
-        async with state.db_pool.acquire() as conn:
-            # Get trades for the day
-            trades = await conn.fetch("""
-                SELECT * FROM positions
-                WHERE DATE(created_at) = $1
-            """, report_date)
-            
-            if not trades:
-                return get_empty_metrics()
-            
-            # Calculate metrics
-            total_pnl = sum(t['pnl'] or 0 for t in trades)
-            realized_pnl = sum(t['pnl'] or 0 for t in trades if t['status'] == 'closed')
-            unrealized_pnl = sum(t['pnl'] or 0 for t in trades if t['status'] == 'active')
-            
-            winning_trades = [t for t in trades if (t['pnl'] or 0) > 0]
-            losing_trades = [t for t in trades if (t['pnl'] or 0) < 0]
-            
-            win_rate = len(winning_trades) / len(trades) * 100 if trades else 0
-            
-            avg_win = sum(t['pnl'] for t in winning_trades) / len(winning_trades) if winning_trades else 0
-            avg_loss = sum(t['pnl'] for t in losing_trades) / len(losing_trades) if losing_trades else 0
-            
-            profit_factor = abs(sum(t['pnl'] for t in winning_trades) / sum(t['pnl'] for t in losing_trades)) if losing_trades else 0
-            
-            # Sharpe ratio (simplified)
-            returns = [t['pnl_percent'] or 0 for t in trades]
-            sharpe = calculate_sharpe_ratio(returns) if returns else 0
-            
-            # Max drawdown
-            drawdown = calculate_max_drawdown([t['pnl'] or 0 for t in trades])
-            
-            # Best and worst trades
-            best_trade = max(trades, key=lambda x: x['pnl'] or 0) if trades else {}
-            worst_trade = min(trades, key=lambda x: x['pnl'] or 0) if trades else {}
-            
-            return PerformanceMetrics(
-                total_pnl=total_pnl,
-                realized_pnl=realized_pnl,
-                unrealized_pnl=unrealized_pnl,
-                win_rate=win_rate,
-                profit_factor=profit_factor,
-                sharpe_ratio=sharpe,
-                max_drawdown=drawdown,
-                average_win=avg_win,
-                average_loss=avg_loss,
-                total_trades=len(trades),
-                winning_trades=len(winning_trades),
-                losing_trades=len(losing_trades),
-                best_trade=dict(best_trade) if best_trade else {},
-                worst_trade=dict(worst_trade) if worst_trade else {}
-            )
-            
-    except Exception as e:
-        logger.error(f"Failed to calculate daily metrics: {e}")
-        return get_empty_metrics()
-
-def calculate_metrics_from_trades(trades: List) -> Dict:
-    """Calculate metrics from trade list"""
-    
-    if not trades:
-        return get_empty_metrics().dict()
-    
-    total_pnl = sum(t['pnl'] or 0 for t in trades)
-    winning_trades = [t for t in trades if (t['pnl'] or 0) > 0]
-    losing_trades = [t for t in trades if (t['pnl'] or 0) < 0]
-    
-    return {
-        "total_pnl": total_pnl,
-        "total_trades": len(trades),
-        "winning_trades": len(winning_trades),
-        "losing_trades": len(losing_trades),
-        "win_rate": len(winning_trades) / len(trades) * 100 if trades else 0,
-        "average_win": sum(t['pnl'] for t in winning_trades) / len(winning_trades) if winning_trades else 0,
-        "average_loss": sum(t['pnl'] for t in losing_trades) / len(losing_trades) if losing_trades else 0
-    }
-
-def calculate_sharpe_ratio(returns: List[float], risk_free_rate: float = 0.02) -> float:
-    """Calculate Sharpe ratio"""
-    
-    if not returns or len(returns) < 2:
-        return 0
-    
-    returns_array = pd.Series(returns)
-    excess_returns = returns_array - risk_free_rate / 252  # Daily risk-free rate
-    
-    if excess_returns.std() == 0:
-        return 0
-    
-    return (excess_returns.mean() / excess_returns.std()) * (252 ** 0.5)  # Annualized
-
-def calculate_max_drawdown(pnl_values: List[float]) -> float:
-    """Calculate maximum drawdown"""
-    
-    if not pnl_values:
-        return 0
-    
-    cumulative = pd.Series(pnl_values).cumsum()
-    running_max = cumulative.cummax()
-    drawdown = cumulative - running_max
-    
-    return abs(drawdown.min()) if len(drawdown) > 0 else 0
-
-def calculate_var(values: List[float], confidence: float = 0.95) -> float:
-    """Calculate Value at Risk"""
-    
-    if not values:
-        return 0
-    
-    sorted_values = sorted(values)
-    index = int((1 - confidence) * len(sorted_values))
-    
-    return abs(sorted_values[index]) if index < len(sorted_values) else 0
-
-def calculate_risk_score(exposure: float, max_exposure: float, var: float, positions: int) -> float:
-    """Calculate overall risk score (0-100)"""
-    
-    score = 0
-    
-    # Exposure ratio (40 points)
-    exposure_ratio = exposure / max_exposure if max_exposure > 0 else 0
-    score += (1 - exposure_ratio) * 40
-    
-    # VaR ratio (30 points)
-    var_ratio = var / exposure if exposure > 0 else 0
-    score += (1 - min(var_ratio, 1)) * 30
-    
-    # Position concentration (30 points)
-    concentration = min(positions / 5, 1)  # Optimal is 5 positions
-    score += concentration * 30
-    
-    return min(100, max(0, score))
-
-def calculate_position_correlations(positions: List[Dict]) -> Dict:
-    """Calculate correlations between positions"""
-    
-    # Simplified correlation calculation
-    # In production, would use historical price data
-    
-    correlations = {}
-    for i, pos1 in enumerate(positions):
-        for j, pos2 in enumerate(positions[i+1:], i+1):
-            key = f"{pos1['symbol']}_{pos2['symbol']}"
-            # Placeholder correlation
-            correlations[key] = 0.3
-    
-    return correlations
-
-def calculate_sector_exposure(positions: List[Dict]) -> Dict:
-    """Calculate sector exposure"""
-    
-    # Simplified sector mapping
-    # In production, would use proper sector classification
-    
-    tech_symbols = ['AAPL', 'MSFT', 'GOOGL', 'META', 'NVDA', 'AMD']
-    finance_symbols = ['JPM', 'BAC', 'GS', 'MS', 'WFC']
-    
-    sectors = {}
-    for pos in positions:
-        if pos['symbol'] in tech_symbols:
-            sector = 'Technology'
-        elif pos['symbol'] in finance_symbols:
-            sector = 'Finance'
-        else:
-            sector = 'Other'
-        
-        if sector not in sectors:
-            sectors[sector] = 0
-        sectors[sector] += pos.get('market_value', 0)
-    
-    return sectors
-
-# === HELPER FUNCTIONS ===
-
-async def get_daily_trades(report_date: date) -> List[Dict]:
-    """Get trades for a specific date"""
-    
-    try:
-        async with state.db_pool.acquire() as conn:
-            rows = await conn.fetch("""
-                SELECT * FROM orders
-                WHERE DATE(created_at) = $1
-                ORDER BY created_at DESC
-            """, report_date)
-            
-            return [dict(row) for row in rows]
-    except Exception as e:
-        logger.error(f"Failed to get daily trades: {e}")
-        return []
-
-async def get_active_positions_for_date(report_date: date) -> List[Dict]:
-    """Get active positions for a date"""
-    
-    try:
-        async with state.db_pool.acquire() as conn:
-            rows = await conn.fetch("""
-                SELECT * FROM positions
-                WHERE status = 'active'
-                AND DATE(created_at) <= $1
-            """, report_date)
-            
-            return [dict(row) for row in rows]
-    except Exception as e:
-        logger.error(f"Failed to get positions: {e}")
-        return []
-
-async def get_active_positions() -> List[Dict]:
-    """Get current active positions"""
-    
-    try:
-        async with state.db_pool.acquire() as conn:
-            rows = await conn.fetch("""
-                SELECT 
-                    p.*,
-                    p.quantity * p.current_price as market_value
-                FROM positions p
-                WHERE status = 'active'
-            """)
-            
-            return [dict(row) for row in rows]
-    except Exception as e:
-        logger.error(f"Failed to get active positions: {e}")
-        return []
-
-async def get_top_patterns_for_date(report_date: date) -> List[Dict]:
-    """Get top performing patterns for a date"""
-    
-    try:
-        async with state.db_pool.acquire() as conn:
-            rows = await conn.fetch("""
-                SELECT 
-                    pattern_type,
-                    COUNT(*) as count,
-                    AVG(confidence) as avg_confidence
-                FROM pattern_detections
-                WHERE DATE(created_at) = $1
-                GROUP BY pattern_type
-                ORDER BY count DESC
-                LIMIT 5
-            """, report_date)
-            
-            return [dict(row) for row in rows]
-    except Exception as e:
-        logger.error(f"Failed to get patterns: {e}")
-        return []
-
-async def get_market_conditions(report_date: date) -> Dict:
-    """Get market conditions for a date"""
-    
-    # Simplified market conditions
-    # In production, would fetch from market data
-    
-    return {
-        "vix": 18.5,
-        "spy_change": 0.5,
-        "volume": "above_average",
-        "trend": "bullish",
-        "volatility": "moderate"
-    }
-
-async def calculate_risk_metrics(report_date: date) -> Dict:
-    """Calculate risk metrics for a date"""
-    
-    positions = await get_active_positions_for_date(report_date)
-    
-    if not positions:
-        return {
-            "total_exposure": 0,
-            "position_count": 0,
-            "largest_position": 0,
-            "risk_score": 0
-        }
-    
-    total_exposure = sum(p.get('market_value', 0) for p in positions)
-    largest_position = max(p.get('market_value', 0) for p in positions)
-    
-    return {
-        "total_exposure": total_exposure,
-        "position_count": len(positions),
-        "largest_position": largest_position,
-        "risk_score": calculate_risk_score(total_exposure, 50000, 0, len(positions))
-    }
-
-async def get_pnl_history(days: int) -> List[Dict]:
-    """Get P&L history for charting"""
-    
-    try:
-        start_date = datetime.now() - timedelta(days=days)
-        
-        async with state.db_pool.acquire() as conn:
-            rows = await conn.fetch("""
-                SELECT 
-                    DATE(created_at) as date,
-                    SUM(pnl) as daily_pnl
-                FROM positions
-                WHERE created_at >= $1
-                GROUP BY DATE(created_at)
-                ORDER BY date
-            """, start_date)
-            
-            # Calculate cumulative P&L
-            pnl_data = []
-            cumulative = 0
-            
-            for row in rows:
-                daily_pnl = float(row['daily_pnl'] or 0)
-                cumulative += daily_pnl
-                
-                pnl_data.append({
-                    "date": row['date'].isoformat(),
-                    "daily_pnl": daily_pnl,
-                    "cumulative_pnl": cumulative
-                })
-            
-            return pnl_data
-            
-    except Exception as e:
-        logger.error(f"Failed to get P&L history: {e}")
-        return []
-
-async def generate_daily_report() -> Dict:
-    """Generate daily report"""
-    
-    today = date.today()
-    metrics = await calculate_daily_metrics(today)
-    trades = await get_daily_trades(today)
-    
-    return {
-        "date": today.isoformat(),
-        "metrics": metrics.dict(),
-        "trades": trades,
-        "summary": f"Completed {len(trades)} trades with {metrics.win_rate:.1f}% win rate"
-    }
-
-async def generate_weekly_report() -> Dict:
-    """Generate weekly report"""
-    
-    # Simplified weekly report
-    return {
-        "period": "weekly",
-        "start_date": (datetime.now() - timedelta(days=7)).date().isoformat(),
-        "end_date": date.today().isoformat(),
-        "summary": "Weekly report generated"
-    }
-
-async def generate_monthly_report() -> Dict:
-    """Generate monthly report"""
-    
-    # Simplified monthly report
-    return {
-        "period": "monthly",
-        "month": datetime.now().strftime("%B %Y"),
-        "summary": "Monthly report generated"
-    }
-
-async def generate_periodic_reports():
-    """Background task to generate periodic reports"""
-    
-    logger.info("Starting periodic report generation")
-    
-    while True:
-        try:
-            # Generate daily report at end of day
-            now = datetime.now()
-            if now.hour == 16 and now.minute == 0:  # 4 PM EST
-                report = await generate_daily_report()
-                logger.info(f"Generated daily report: {report}")
-            
-            await asyncio.sleep(60)  # Check every minute
-            
-        except Exception as e:
-            logger.error(f"Periodic report generation error: {e}")
-            await asyncio.sleep(300)
-
-def get_empty_metrics() -> PerformanceMetrics:
-    """Return empty metrics object"""
-    
-    return PerformanceMetrics(
-        total_pnl=0,
-        realized_pnl=0,
-        unrealized_pnl=0,
-        win_rate=0,
-        profit_factor=0,
-        sharpe_ratio=0,
-        max_drawdown=0,
-        average_win=0,
-        average_loss=0,
-        total_trades=0,
-        winning_trades=0,
-        losing_trades=0,
-        best_trade={},
-        worst_trade={}
-    )
-
-# === MAIN ENTRY POINT ===
+# ============================================================================
+# MAIN
+# ============================================================================
 
 if __name__ == "__main__":
     import uvicorn
-    
-    print("=" * 60)
-    print("🎩 Catalyst Trading System - Reporting Service v4.1")
-    print("=" * 60)
-    print("Status: Starting...")
-    print("Port: 5009")
-    print("Protocol: REST API")
-    print("=" * 60)
-    
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=5009,
+        port=Config.PORT,
         log_level="info"
     )

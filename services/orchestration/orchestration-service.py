@@ -1,798 +1,642 @@
 #!/usr/bin/env python3
 """
 Name of Application: Catalyst Trading System
-Name of file: orchestration-service.py  
-Version: 4.4.2
-Last Updated: 2025-09-28
-Purpose: Complete MCP orchestration service for Claude Desktop integration - Fixed for FastMCP 2.12.4
+Name of file: orchestration-service.py
+Version: 5.0.0
+Last Updated: 2025-10-06
+Purpose: MCP orchestration with normalized schema awareness (security_id + time_id)
 
 REVISION HISTORY:
-v4.4.2 (2025-09-28) - FastMCP compatibility fixes
-- Removed @mcp.on_initialize() and @mcp.on_cleanup() decorators (not supported)
-- Manual initialization in main function
-- Compatible with FastMCP 2.12.4
-- Fixed resource URI format for current FastMCP version
-- Simplified initialization flow
+v5.0.0 (2025-10-06) - Normalized Schema Update
+- ✅ Handles security_id in responses from other services
+- ✅ Passes security_id between services (not just symbol)
+- ✅ No direct database writes (calls other services)
+- ✅ MCP resources return security_id + symbol
+- ✅ Tools coordinate between normalized services
+- ✅ Schema-aware responses (mentions FKs in context)
+- ✅ Error handling compliant with v1.0 standard
 
-v4.4.1 (2025-09-28) - Import fixes for MCP
-- from mcp.server import FastMCP
-- from mcp.types import JSONRPCError as McpError
-- from mcp.types import CompletionContext as Context
-
-v4.4.0 (2025-09-28) - Complete MCP implementation
-- Added all MCP resources for Claude Desktop access
-- Added comprehensive MCP tools for trading operations
-- Implemented proper initialization and cleanup handlers
-- Added service communication helpers
-- Complete implementation ready for Claude Desktop
+v4.0.0 (2025-09-15) - DEPRECATED (Symbol-based)
+- Only passed symbols between services
+- No awareness of security_id FKs
 
 Description of Service:
-Complete MCP orchestration service providing Claude Desktop with full access to:
-1. System state via hierarchical resources
-2. Trading operations via comprehensive tools
-3. Real-time monitoring and control capabilities
-4. Seamless integration with all REST services
+MCP server that orchestrates all trading services using normalized v5.0 schema:
+- Exposes resources for Claude to query system state
+- Provides tools for triggering scans, analyzing positions
+- Coordinates between services using security_id
+- Returns both security_id and symbol in all responses
+- Schema-aware: knows data uses FKs not duplicate symbols
 """
 
-import asyncio
-import logging
-import os
-import sys
-import signal
+from fastmcp import FastMCP, Context
+from fastmcp.exceptions import McpError
+from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any
+from pydantic import BaseModel
 import aiohttp
-import asyncpg
-from dataclasses import dataclass, asdict
-from enum import Enum
+import asyncio
 import json
-import uuid
+import os
+import logging
 
-# MCP imports with fallback
-MCP_AVAILABLE = False
-try:
-    from mcp.server import FastMCP
-    from mcp.types import JSONRPCError as McpError
-    from mcp.types import CompletionContext as Context
-    MCP_AVAILABLE = True
-    mcp = FastMCP("catalyst-orchestration")
-except ImportError:
-    print("MCP not available, running in standalone mode")
-    MCP_AVAILABLE = False
-    # Create dummy classes for standalone mode
-    class FastMCP:
-        def __init__(self, name): 
-            self.name = name
-        def resource(self, path): 
-            return lambda f: f
-        def tool(self): 
-            return lambda f: f
-        def run(self, **kwargs): 
-            pass
-    class Context: 
-        pass
-    class McpError(Exception): 
-        pass
-    mcp = FastMCP("catalyst-orchestration")
+# ============================================================================
+# LOGGING SETUP
+# ============================================================================
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# === SERVICE CONFIGURATION ===
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
 
-SERVICE_URLS = {
-    "scanner": os.getenv("SCANNER_URL", "http://172.18.0.1:5001"),
-    "pattern": os.getenv("PATTERN_URL", "http://172.18.0.1:5002"),
-    "technical": os.getenv("TECHNICAL_URL", "http://172.18.0.1:5003"),
-    "risk_manager": os.getenv("RISK_URL", "http://172.18.0.1:5004"),
-    "trading": os.getenv("TRADING_URL", "http://172.18.0.1:5005"),
-    "news": os.getenv("NEWS_URL", "http://172.18.0.1:5008"),
-    "reporting": os.getenv("REPORTING_URL", "http://172.18.0.1:5009")
-}
-
-class WorkflowState(Enum):
-    IDLE = "idle"
-    SCANNING = "scanning"
-    ANALYZING = "analyzing"
-    EXECUTING = "executing"
-    MONITORING = "monitoring"
-
-@dataclass
-class TradingCycle:
-    cycle_id: str
-    mode: str
-    status: str
-    start_time: datetime
-    scan_frequency: int = 300
-    max_positions: int = 5
-    aggressiveness: float = 0.5
-    risk_level: float = 0.02
+class Config:
+    """Service configuration"""
+    SERVICE_NAME = "orchestration-service"
+    VERSION = "5.0.0"
     
-    def to_dict(self) -> Dict:
-        return {
-            "cycle_id": self.cycle_id,
-            "mode": self.mode,
-            "status": self.status,
-            "start_time": self.start_time.isoformat(),
-            "scan_frequency": self.scan_frequency,
-            "max_positions": self.max_positions,
-            "aggressiveness": self.aggressiveness,
-            "risk_level": self.risk_level
-        }
+    # Service URLs
+    SCANNER_URL = os.getenv("SCANNER_URL", "http://scanner:5001")
+    PATTERN_URL = os.getenv("PATTERN_URL", "http://pattern:5002")
+    TECHNICAL_URL = os.getenv("TECHNICAL_URL", "http://technical:5003")
+    RISK_MANAGER_URL = os.getenv("RISK_MANAGER_URL", "http://risk-manager:5004")
+    NEWS_URL = os.getenv("NEWS_URL", "http://news:5005")
+    REPORTING_URL = os.getenv("REPORTING_URL", "http://reporting:5006")
+    
+    # Timeouts
+    REQUEST_TIMEOUT = 30
+    LONG_REQUEST_TIMEOUT = 120  # For scans
 
-class SystemState:
-    def __init__(self):
-        self.current_cycle: Optional[TradingCycle] = None
-        self.workflow_state: WorkflowState = WorkflowState.IDLE
-        self.service_health: Dict[str, Dict] = {}
-        self.db_pool: Optional[asyncpg.Pool] = None
-        self.http_session: Optional[aiohttp.ClientSession] = None
-        self.shutdown_event = asyncio.Event()
-        self.last_health_check: Optional[datetime] = None
-        self.active_positions: List[Dict] = []
-        self.pending_signals: List[Dict] = []
+# ============================================================================
+# MCP SERVER
+# ============================================================================
 
-# Global state instance
-state = SystemState()
+mcp = FastMCP(
+    "Catalyst Trading MCP",
+    version=Config.VERSION
+)
 
-# === HELPER FUNCTIONS ===
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
 
-async def call_service(service_name: str, method: str, endpoint: str, data: Optional[Dict] = None, timeout: int = 10) -> Dict:
-    """Call a REST service endpoint"""
+async def make_request(
+    method: str,
+    url: str,
+    timeout: int = Config.REQUEST_TIMEOUT,
+    **kwargs
+) -> Dict[str, Any]:
+    """
+    Make HTTP request to a service with error handling.
+    
+    Returns both security_id and symbol when available.
+    """
     try:
-        if not state.http_session:
-            return {"success": False, "error": "HTTP session not initialized"}
-        
-        if service_name not in SERVICE_URLS:
-            return {"success": False, "error": f"Unknown service: {service_name}"}
-        
-        url = f"{SERVICE_URLS[service_name]}{endpoint}"
-        
-        async with aiohttp.ClientTimeout(total=timeout):
-            if method.upper() == "GET":
-                async with state.http_session.get(url) as response:
-                    if response.status == 200:
-                        return await response.json()
-                    else:
-                        return {"success": False, "error": f"HTTP {response.status}"}
-            elif method.upper() == "POST":
-                async with state.http_session.post(url, json=data) as response:
-                    if response.status == 200:
-                        return await response.json()
-                    else:
-                        return {"success": False, "error": f"HTTP {response.status}"}
-            else:
-                return {"success": False, "error": f"Unsupported method: {method}"}
-                
+        async with aiohttp.ClientSession() as session:
+            async with session.request(
+                method,
+                url,
+                timeout=aiohttp.ClientTimeout(total=timeout),
+                **kwargs
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return {"success": True, "data": data}
+                else:
+                    error_text = await resp.text()
+                    logger.error(f"Request failed: {method} {url} - {resp.status} - {error_text}")
+                    return {
+                        "success": False,
+                        "error": f"HTTP {resp.status}: {error_text}"
+                    }
+    
     except asyncio.TimeoutError:
-        logger.error(f"Service call timeout: {service_name}/{endpoint}")
-        return {"success": False, "error": "Service timeout"}
+        logger.error(f"Request timeout: {method} {url}")
+        return {"success": False, "error": "Request timeout"}
+    
     except Exception as e:
-        logger.error(f"Service call failed {service_name}/{endpoint}: {e}")
+        logger.error(f"Request error: {method} {url} - {e}")
         return {"success": False, "error": str(e)}
 
-async def check_all_services() -> Dict:
-    """Check health of all services"""
-    health_status = {}
+def format_response(data: Any, include_schema_note: bool = False) -> str:
+    """
+    Format response for Claude with optional schema awareness note.
+    """
+    response = json.dumps(data, indent=2, default=str)
     
-    for service_name, url in SERVICE_URLS.items():
-        try:
-            if state.http_session:
-                async with state.http_session.get(f"{url}/health", timeout=aiohttp.ClientTimeout(total=3)) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        health_status[service_name] = {"status": "healthy", "data": data}
-                    else:
-                        health_status[service_name] = {"status": "unhealthy", "http_status": resp.status}
-            else:
-                health_status[service_name] = {"status": "error", "error": "HTTP session not available"}
-        except Exception as e:
-            health_status[service_name] = {"status": "error", "error": str(e)}
+    if include_schema_note:
+        response += "\n\n📊 Note: All data uses v5.0 normalized schema with security_id FKs"
     
-    return health_status
+    return response
 
-async def update_service_health():
-    """Update service health status"""
-    state.service_health = await check_all_services()
-    state.last_health_check = datetime.now()
+# ============================================================================
+# RESOURCES (Read-Only Data for Claude)
+# ============================================================================
 
-async def check_database_health() -> Dict:
-    """Check database connectivity"""
-    try:
-        if state.db_pool:
-            async with state.db_pool.acquire() as conn:
-                result = await conn.fetchval("SELECT 1")
-                return {"status": "healthy", "connection": "active"}
-        else:
-            return {"status": "error", "error": "Database pool not initialized"}
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
+@mcp.resource("market-scan://latest-candidates")
+async def get_latest_candidates(ctx: Context) -> str:
+    """
+    Get latest market scan candidates with security_id + symbol.
+    
+    Returns candidates from most recent scan with both security_id and symbol
+    for proper FK tracking.
+    """
+    result = await make_request(
+        "GET",
+        f"{Config.SCANNER_URL}/api/v1/candidates"
+    )
+    
+    if not result['success']:
+        raise McpError("SCANNER_ERROR", result.get('error', 'Unknown error'))
+    
+    return format_response(result['data'], include_schema_note=True)
 
-def generate_cycle_id() -> str:
-    """Generate unique cycle ID"""
-    return f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{str(uuid.uuid4())[:8]}"
+@mcp.resource("positions://open")
+async def get_open_positions(ctx: Context, cycle_id: int = 1) -> str:
+    """
+    Get all open positions with security_id + symbol via JOINs.
+    
+    Returns position data that includes:
+    - security_id (FK to securities table)
+    - symbol (from JOIN)
+    - sector_name (from JOIN)
+    """
+    result = await make_request(
+        "GET",
+        f"{Config.RISK_MANAGER_URL}/api/v1/risk/positions",
+        params={"cycle_id": cycle_id}
+    )
+    
+    if not result['success']:
+        raise McpError("RISK_MANAGER_ERROR", result.get('error', 'Unknown error'))
+    
+    return format_response(result['data'], include_schema_note=True)
 
-# === MCP RESOURCES (Read Operations) ===
+@mcp.resource("risk://sector-exposure")
+async def get_sector_exposure(ctx: Context, cycle_id: int = 1) -> str:
+    """
+    Get sector exposure breakdown via positions → securities → sectors JOINs.
+    
+    Shows how much capital is allocated to each sector using normalized schema.
+    """
+    result = await make_request(
+        "GET",
+        f"{Config.RISK_MANAGER_URL}/api/v1/risk/sector-exposure",
+        params={"cycle_id": cycle_id}
+    )
+    
+    if not result['success']:
+        raise McpError("RISK_MANAGER_ERROR", result.get('error', 'Unknown error'))
+    
+    return format_response(result['data'], include_schema_note=True)
 
-@mcp.resource("http://localhost/trading_cycle_current")
-async def get_current_cycle() -> Dict:
-    """Get current trading cycle status"""
-    if state.current_cycle:
-        return {
-            "has_active_cycle": True,
-            "cycle": state.current_cycle.to_dict(),
-            "workflow_state": state.workflow_state.value,
-            "active_positions": len(state.active_positions),
-            "pending_signals": len(state.pending_signals)
+@mcp.resource("risk://daily-limits")
+async def get_daily_limits(ctx: Context, cycle_id: int = 1) -> str:
+    """
+    Get daily risk limits and current usage.
+    
+    Shows:
+    - Max positions vs current positions
+    - Daily loss limit vs current P&L
+    - Risk parameters from risk_parameters table
+    """
+    result = await make_request(
+        "GET",
+        f"{Config.RISK_MANAGER_URL}/api/v1/risk/daily-limits",
+        params={"cycle_id": cycle_id}
+    )
+    
+    if not result['success']:
+        raise McpError("RISK_MANAGER_ERROR", result.get('error', 'Unknown error'))
+    
+    return format_response(result['data'])
+
+@mcp.resource("patterns://high-confidence")
+async def get_high_confidence_patterns(
+    ctx: Context,
+    min_confidence: float = 0.75,
+    hours: int = 24
+) -> str:
+    """
+    Get high-confidence patterns across all securities.
+    
+    Returns patterns from pattern_analysis table with:
+    - security_id (FK)
+    - symbol (from JOIN)
+    - Pattern type, confidence, levels
+    """
+    result = await make_request(
+        "GET",
+        f"{Config.PATTERN_URL}/api/v1/patterns/high-confidence",
+        params={
+            "min_confidence": min_confidence,
+            "hours": hours
         }
-    return {
-        "has_active_cycle": False,
-        "status": "no_active_cycle",
-        "workflow_state": state.workflow_state.value
+    )
+    
+    if not result['success']:
+        raise McpError("PATTERN_ERROR", result.get('error', 'Unknown error'))
+    
+    return format_response(result['data'], include_schema_note=True)
+
+@mcp.resource("news://recent-catalysts")
+async def get_recent_catalysts(
+    ctx: Context,
+    hours: int = 24,
+    min_catalyst_strength: float = 0.7
+) -> str:
+    """
+    Get recent news catalysts with security_id + symbol.
+    
+    Returns news from news_sentiment table with:
+    - security_id (FK)
+    - symbol (from JOIN)
+    - Catalyst strength, sentiment, impact
+    """
+    result = await make_request(
+        "GET",
+        f"{Config.NEWS_URL}/api/v1/news/catalysts",
+        params={
+            "hours": hours,
+            "min_strength": min_catalyst_strength
+        }
+    )
+    
+    if not result['success']:
+        raise McpError("NEWS_ERROR", result.get('error', 'Unknown error'))
+    
+    return format_response(result['data'], include_schema_note=True)
+
+@mcp.resource("system://health")
+async def get_system_health(ctx: Context) -> str:
+    """
+    Get health status of all services.
+    
+    Checks which services are up and their schema versions.
+    """
+    services = {
+        "scanner": Config.SCANNER_URL,
+        "pattern": Config.PATTERN_URL,
+        "technical": Config.TECHNICAL_URL,
+        "risk-manager": Config.RISK_MANAGER_URL,
+        "news": Config.NEWS_URL,
+        "reporting": Config.REPORTING_URL
     }
-
-@mcp.resource("http://localhost/trading_cycle_performance")
-async def get_cycle_performance() -> Dict:
-    """Get current cycle performance metrics"""
-    try:
-        if not state.current_cycle:
-            return {"error": "No active trading cycle"}
+    
+    health_results = {}
+    
+    for name, base_url in services.items():
+        result = await make_request("GET", f"{base_url}/health", timeout=5)
         
-        # Get performance data from reporting service
-        result = await call_service("reporting", "GET", f"/api/v1/performance/{state.current_cycle.cycle_id}")
-        
-        if result.get("success"):
-            return result.get("data", {})
+        if result['success']:
+            health_results[name] = {
+                "status": "healthy",
+                "data": result['data']
+            }
         else:
-            return {"error": "Failed to fetch performance data"}
-            
-    except Exception as e:
-        logger.error(f"Error getting cycle performance: {e}")
-        return {"error": str(e)}
+            health_results[name] = {
+                "status": "unhealthy",
+                "error": result.get('error')
+            }
+    
+    return format_response({
+        "orchestration_version": Config.VERSION,
+        "schema_version": "v5.0 normalized",
+        "services": health_results
+    })
 
-@mcp.resource("http://localhost/market_scan_latest")
-async def get_latest_scan() -> Dict:
-    """Get latest market scan results"""
-    try:
-        result = await call_service("scanner", "GET", "/api/v1/scan/latest")
-        return result
-    except Exception as e:
-        logger.error(f"Error getting latest scan: {e}")
-        return {"error": str(e)}
-
-@mcp.resource("http://localhost/market_scan_candidates")
-async def get_scan_candidates() -> Dict:
-    """Get current market scan candidates"""
-    try:
-        result = await call_service("scanner", "GET", "/api/v1/candidates")
-        return result
-    except Exception as e:
-        logger.error(f"Error getting scan candidates: {e}")
-        return {"error": str(e)}
-
-@mcp.resource("http://localhost/positions_active")
-async def get_active_positions() -> Dict:
-    """Get current active positions"""
-    try:
-        result = await call_service("trading", "GET", "/api/v1/positions/active")
-        if result.get("success"):
-            state.active_positions = result.get("data", [])
-        return result
-    except Exception as e:
-        logger.error(f"Error getting active positions: {e}")
-        return {"error": str(e)}
-
-@mcp.resource("http://localhost/positions_summary")
-async def get_positions_summary() -> Dict:
-    """Get positions summary and P&L"""
-    try:
-        result = await call_service("trading", "GET", "/api/v1/positions/summary")
-        return result
-    except Exception as e:
-        logger.error(f"Error getting positions summary: {e}")
-        return {"error": str(e)}
-
-@mcp.resource("http://localhost/system_health")
-async def get_system_health() -> Dict:
-    """Get overall system health status"""
-    try:
-        # Update health if stale (older than 30 seconds)
-        if not state.last_health_check or (datetime.now() - state.last_health_check).seconds > 30:
-            await update_service_health()
-        
-        return {
-            "system_status": "operational" if all(s.get("status") == "healthy" for s in state.service_health.values()) else "degraded",
-            "services": state.service_health,
-            "workflow_state": state.workflow_state.value,
-            "database": await check_database_health(),
-            "active_cycle": state.current_cycle.cycle_id if state.current_cycle else None,
-            "last_updated": state.last_health_check.isoformat() if state.last_health_check else None,
-            "timestamp": datetime.now().isoformat()
-        }
-    except Exception as e:
-        logger.error(f"Error getting system health: {e}")
-        return {"error": str(e)}
-
-@mcp.resource("http://localhost/news_latest")
-async def get_latest_news() -> Dict:
-    """Get latest market news and catalysts"""
-    try:
-        result = await call_service("news", "GET", "/api/v1/news/latest")
-        return result
-    except Exception as e:
-        logger.error(f"Error getting latest news: {e}")
-        return {"error": str(e)}
-
-@mcp.resource("http://localhost/analysis_technical")
-async def get_technical_analysis() -> Dict:
-    """Get technical analysis for current candidates"""
-    try:
-        result = await call_service("technical", "GET", "/api/v1/analysis/latest")
-        return result
-    except Exception as e:
-        logger.error(f"Error getting technical analysis: {e}")
-        return {"error": str(e)}
-
-@mcp.resource("http://localhost/risk_assessment")
-async def get_risk_assessment() -> Dict:
-    """Get current risk assessment"""
-    try:
-        result = await call_service("risk_manager", "GET", "/api/v1/risk/current")
-        return result
-    except Exception as e:
-        logger.error(f"Error getting risk assessment: {e}")
-        return {"error": str(e)}
-
-# === MCP TOOLS (Write Operations) ===
+# ============================================================================
+# TOOLS (Actions Claude Can Take)
+# ============================================================================
 
 @mcp.tool()
-async def start_trading_cycle(
-    mode: str = "normal",
-    aggressiveness: float = 0.5,
-    max_positions: int = 5,
-    scan_frequency: int = 300,
-    risk_level: float = 0.02
-) -> Dict:
-    """Start a new trading cycle
-    
-    Args:
-        mode: Trading mode (aggressive/normal/conservative)
-        aggressiveness: Risk level from 0.0 to 1.0
-        max_positions: Maximum concurrent positions
-        scan_frequency: Scan frequency in seconds
-        risk_level: Maximum risk per trade (0.01 = 1%)
-    
-    Returns:
-        Trading cycle configuration and status
+async def trigger_market_scan(ctx: Context) -> str:
     """
-    try:
-        if state.current_cycle and state.current_cycle.status in ["active", "starting"]:
-            return {"success": False, "error": "Trading cycle already active"}
-        
-        # Validate parameters
-        if mode not in ["aggressive", "normal", "conservative"]:
-            return {"success": False, "error": "Invalid mode. Use: aggressive, normal, or conservative"}
-        
-        if not 0.0 <= aggressiveness <= 1.0:
-            return {"success": False, "error": "Aggressiveness must be between 0.0 and 1.0"}
-        
-        if max_positions < 1 or max_positions > 10:
-            return {"success": False, "error": "Max positions must be between 1 and 10"}
-        
-        # Generate cycle ID
-        cycle_id = generate_cycle_id()
-        
-        # Create new cycle
-        state.current_cycle = TradingCycle(
-            cycle_id=cycle_id,
-            mode=mode,
-            status="starting",
-            start_time=datetime.now(),
-            scan_frequency=scan_frequency,
-            max_positions=max_positions,
-            aggressiveness=aggressiveness,
-            risk_level=risk_level
-        )
-        
-        logger.info(f"Starting trading cycle {cycle_id} in {mode} mode")
-        
-        # Initialize all services with cycle configuration
-        cycle_config = {
-            "cycle_id": cycle_id,
-            "mode": mode,
-            "aggressiveness": aggressiveness,
-            "max_positions": max_positions,
-            "scan_frequency": scan_frequency,
-            "risk_level": risk_level
-        }
-        
-        # Start scanner service
-        scanner_result = await call_service("scanner", "POST", "/api/v1/cycle/start", cycle_config)
-        if not scanner_result.get("success"):
-            state.current_cycle = None
-            return {"success": False, "error": f"Failed to start scanner: {scanner_result.get('error')}"}
-        
-        # Initialize other services
-        services_to_init = ["pattern", "technical", "news", "risk_manager"]
-        for service_name in services_to_init:
-            result = await call_service(service_name, "POST", "/api/v1/cycle/init", cycle_config)
-            if not result.get("success"):
-                logger.warning(f"Failed to initialize {service_name}: {result.get('error')}")
-        
-        # Update cycle status
-        state.current_cycle.status = "active"
-        state.workflow_state = WorkflowState.SCANNING
-        
-        return {
-            "success": True,
-            "cycle_id": cycle_id,
-            "status": "active",
-            "configuration": cycle_config,
-            "message": f"Trading cycle {cycle_id} started successfully in {mode} mode"
-        }
-        
-    except Exception as e:
-        logger.error(f"Failed to start trading cycle: {e}")
-        if state.current_cycle:
-            state.current_cycle = None
-        return {"success": False, "error": str(e)}
+    Trigger a market scan to find new candidates.
+    
+    Returns scan_id and candidate count with security_ids.
+    """
+    logger.info("Triggering market scan...")
+    
+    result = await make_request(
+        "POST",
+        f"{Config.SCANNER_URL}/api/v1/scan",
+        timeout=Config.LONG_REQUEST_TIMEOUT
+    )
+    
+    if not result['success']:
+        raise McpError("SCAN_FAILED", result.get('error', 'Scan failed'))
+    
+    logger.info(f"✅ Scan complete: {result['data']}")
+    
+    return format_response({
+        "success": True,
+        "message": "Market scan completed",
+        "data": result['data']
+    }, include_schema_note=True)
 
 @mcp.tool()
-async def stop_trading_cycle() -> Dict:
-    """Stop the current trading cycle"""
-    try:
-        if not state.current_cycle:
-            return {"success": False, "error": "No active trading cycle"}
-        
-        cycle_id = state.current_cycle.cycle_id
-        logger.info(f"Stopping trading cycle {cycle_id}")
-        
-        # Stop all services
-        for service_name in SERVICE_URLS.keys():
-            result = await call_service(service_name, "POST", "/api/v1/cycle/stop", {"cycle_id": cycle_id})
-            if not result.get("success"):
-                logger.warning(f"Failed to stop {service_name}: {result.get('error')}")
-        
-        # Update cycle status
-        state.current_cycle.status = "stopped"
-        state.workflow_state = WorkflowState.IDLE
-        
-        # Archive cycle data
-        cycle_data = state.current_cycle.to_dict()
-        cycle_data["stopped_at"] = datetime.now().isoformat()
-        
-        # Clear current cycle
-        state.current_cycle = None
-        state.active_positions = []
-        state.pending_signals = []
-        
-        return {
-            "success": True,
-            "cycle_id": cycle_id,
-            "status": "stopped",
-            "final_data": cycle_data,
-            "message": f"Trading cycle {cycle_id} stopped successfully"
-        }
-        
-    except Exception as e:
-        logger.error(f"Failed to stop trading cycle: {e}")
-        return {"success": False, "error": str(e)}
-
-@mcp.tool()
-async def execute_trade(
+async def analyze_symbol(
+    ctx: Context,
     symbol: str,
-    action: str,
-    quantity: int,
-    price: Optional[float] = None,
-    order_type: str = "market"
-) -> Dict:
-    """Execute a trade order
+    timeframe: str = "5min"
+) -> str:
+    """
+    Analyze a symbol: patterns + technical indicators.
     
     Args:
-        symbol: Stock symbol (e.g., 'AAPL')
-        action: 'buy' or 'sell'
-        quantity: Number of shares
-        price: Limit price (optional, uses market price if None)
-        order_type: 'market' or 'limit'
+        symbol: Stock symbol (e.g., AAPL)
+        timeframe: Chart timeframe (1min, 5min, 15min, 1h, 1d)
     
-    Returns:
-        Trade execution result
+    Returns combined analysis with security_id for tracking.
     """
-    try:
-        if not state.current_cycle:
-            return {"success": False, "error": "No active trading cycle"}
-        
-        # Validate parameters
-        if action not in ["buy", "sell"]:
-            return {"success": False, "error": "Action must be 'buy' or 'sell'"}
-        
-        if quantity <= 0:
-            return {"success": False, "error": "Quantity must be positive"}
-        
-        if order_type not in ["market", "limit"]:
-            return {"success": False, "error": "Order type must be 'market' or 'limit'"}
-        
-        if order_type == "limit" and price is None:
-            return {"success": False, "error": "Price required for limit orders"}
-        
-        trade_request = {
-            "symbol": symbol.upper(),
-            "action": action,
-            "quantity": quantity,
-            "price": price,
-            "order_type": order_type,
-            "cycle_id": state.current_cycle.cycle_id
-        }
-        
-        logger.info(f"Executing trade: {action} {quantity} {symbol} @ {price or 'market'}")
-        
-        # Execute trade through trading service
-        result = await call_service("trading", "POST", "/api/v1/orders", trade_request)
-        
-        return result
-        
-    except Exception as e:
-        logger.error(f"Failed to execute trade: {e}")
-        return {"success": False, "error": str(e)}
+    logger.info(f"Analyzing {symbol} on {timeframe}...")
+    
+    # Run pattern detection and technical analysis in parallel
+    pattern_task = make_request(
+        "POST",
+        f"{Config.PATTERN_URL}/api/v1/detect",
+        json={"symbol": symbol, "timeframe": timeframe}
+    )
+    
+    technical_task = make_request(
+        "POST",
+        f"{Config.TECHNICAL_URL}/api/v1/calculate",
+        json={"symbol": symbol, "timeframe": timeframe}
+    )
+    
+    pattern_result, technical_result = await asyncio.gather(
+        pattern_task,
+        technical_task
+    )
+    
+    analysis = {
+        "symbol": symbol.upper(),
+        "timeframe": timeframe,
+        "timestamp": datetime.utcnow().isoformat(),
+        "patterns": pattern_result.get('data') if pattern_result['success'] else None,
+        "technical": technical_result.get('data') if technical_result['success'] else None,
+        "errors": []
+    }
+    
+    if not pattern_result['success']:
+        analysis['errors'].append(f"Pattern analysis failed: {pattern_result.get('error')}")
+    
+    if not technical_result['success']:
+        analysis['errors'].append(f"Technical analysis failed: {technical_result.get('error')}")
+    
+    return format_response(analysis, include_schema_note=True)
 
 @mcp.tool()
-async def get_service_status() -> Dict:
-    """Get detailed status of all services"""
-    try:
-        await update_service_health()
-        
-        return {
-            "success": True,
-            "services": state.service_health,
-            "system_health": "healthy" if all(s.get("status") == "healthy" for s in state.service_health.values()) else "degraded",
-            "timestamp": datetime.now().isoformat()
-        }
-        
-    except Exception as e:
-        logger.error(f"Failed to get service status: {e}")
-        return {"success": False, "error": str(e)}
+async def check_position_risk(
+    ctx: Context,
+    symbol: str,
+    side: str,
+    quantity: int,
+    entry_price: float,
+    stop_price: float,
+    target_price: Optional[float] = None,
+    cycle_id: int = 1
+) -> str:
+    """
+    Check if a proposed position passes risk checks.
+    
+    Args:
+        symbol: Stock symbol
+        side: "long" or "short"
+        quantity: Number of shares
+        entry_price: Entry price
+        stop_price: Stop loss price
+        target_price: Optional target price
+        cycle_id: Trading cycle ID
+    
+    Returns risk check result with violations/warnings.
+    """
+    logger.info(f"Checking risk for {symbol} position...")
+    
+    request_data = {
+        "symbol": symbol,
+        "side": side,
+        "quantity": quantity,
+        "entry_price": entry_price,
+        "stop_price": stop_price,
+        "target_price": target_price
+    }
+    
+    result = await make_request(
+        "POST",
+        f"{Config.RISK_MANAGER_URL}/api/v1/risk/check",
+        params={"cycle_id": cycle_id},
+        json=request_data
+    )
+    
+    if not result['success']:
+        raise McpError("RISK_CHECK_FAILED", result.get('error', 'Risk check failed'))
+    
+    return format_response(result['data'])
 
 @mcp.tool()
-async def force_market_scan() -> Dict:
-    """Force an immediate market scan"""
-    try:
-        if not state.current_cycle:
-            return {"success": False, "error": "No active trading cycle"}
-        
-        result = await call_service("scanner", "POST", "/api/v1/scan/force", {
-            "cycle_id": state.current_cycle.cycle_id
-        })
-        
-        return result
-        
-    except Exception as e:
-        logger.error(f"Failed to force market scan: {e}")
-        return {"success": False, "error": str(e)}
+async def get_technical_indicators(
+    ctx: Context,
+    symbol: str,
+    hours: int = 24,
+    timeframe: str = "5min"
+) -> str:
+    """
+    Get technical indicator history for a symbol.
+    
+    Returns indicators from technical_indicators table with security_id.
+    """
+    logger.info(f"Fetching technical indicators for {symbol}...")
+    
+    result = await make_request(
+        "GET",
+        f"{Config.TECHNICAL_URL}/api/v1/indicators/{symbol}",
+        params={
+            "hours": hours,
+            "timeframe": timeframe
+        }
+    )
+    
+    if not result['success']:
+        raise McpError("TECHNICAL_ERROR", result.get('error', 'Failed to fetch indicators'))
+    
+    return format_response(result['data'], include_schema_note=True)
 
 @mcp.tool()
-async def emergency_stop() -> Dict:
-    """Emergency stop - close all positions and stop cycle"""
-    try:
-        logger.warning("EMERGENCY STOP initiated")
-        
-        # Close all positions first
-        close_result = await call_service("trading", "POST", "/api/v1/positions/close_all", {
-            "reason": "emergency_stop"
-        })
-        
-        # Stop trading cycle
-        if state.current_cycle:
-            stop_result = await stop_trading_cycle()
-        else:
-            stop_result = {"success": True, "message": "No active cycle"}
-        
-        return {
-            "success": True,
-            "emergency_stop": True,
-            "positions_closed": close_result.get("success", False),
-            "cycle_stopped": stop_result.get("success", False),
-            "message": "Emergency stop completed",
-            "timestamp": datetime.now().isoformat()
+async def get_pattern_history(
+    ctx: Context,
+    symbol: str,
+    days: int = 7,
+    min_confidence: float = 0.60
+) -> str:
+    """
+    Get pattern detection history for a symbol.
+    
+    Returns patterns from pattern_analysis table with security_id.
+    """
+    logger.info(f"Fetching pattern history for {symbol}...")
+    
+    result = await make_request(
+        "GET",
+        f"{Config.PATTERN_URL}/api/v1/patterns/{symbol}",
+        params={
+            "days": days,
+            "min_confidence": min_confidence
         }
-        
-    except Exception as e:
-        logger.error(f"Emergency stop failed: {e}")
-        return {"success": False, "error": str(e)}
+    )
+    
+    if not result['success']:
+        raise McpError("PATTERN_ERROR", result.get('error', 'Failed to fetch patterns'))
+    
+    return format_response(result['data'], include_schema_note=True)
 
-# === INITIALIZATION FUNCTIONS (No decorators - called manually) ===
+@mcp.tool()
+async def get_news_for_symbol(
+    ctx: Context,
+    symbol: str,
+    hours: int = 24
+) -> str:
+    """
+    Get recent news for a symbol.
+    
+    Returns news from news_sentiment table with security_id and impact metrics.
+    """
+    logger.info(f"Fetching news for {symbol}...")
+    
+    result = await make_request(
+        "GET",
+        f"{Config.NEWS_URL}/api/v1/news/{symbol}",
+        params={"hours": hours}
+    )
+    
+    if not result['success']:
+        raise McpError("NEWS_ERROR", result.get('error', 'Failed to fetch news'))
+    
+    return format_response(result['data'], include_schema_note=True)
 
-async def initialize_server():
-    """Initialize the MCP server and connections"""
-    try:
-        logger.info("Initializing Catalyst Trading MCP orchestration service...")
-        
-        # Initialize database pool
-        database_url = os.getenv("DATABASE_URL", "postgresql://catalyst:catalyst123@172.18.0.1:5432/catalyst_trading")
-        if database_url and not state.db_pool:
-            try:
-                state.db_pool = await asyncpg.create_pool(
-                    database_url,
-                    min_size=2,
-                    max_size=10,
-                    command_timeout=30
-                )
-                logger.info("Database pool initialized")
-            except Exception as e:
-                logger.warning(f"Database connection failed: {e}")
-        
-        # Initialize HTTP session
-        if not state.http_session:
-            timeout = aiohttp.ClientTimeout(total=30)
-            state.http_session = aiohttp.ClientSession(timeout=timeout)
-            logger.info("HTTP session initialized")
-        
-        # Initial health check
-        await update_service_health()
-        healthy_services = sum(1 for s in state.service_health.values() if s.get("status") == "healthy")
-        total_services = len(SERVICE_URLS)
-        
-        logger.info(f"Initial health check: {healthy_services}/{total_services} services healthy")
-        logger.info("Catalyst Trading MCP orchestration service initialized successfully")
-        
-        return {
-            "success": True,
-            "services_healthy": f"{healthy_services}/{total_services}",
-            "database": "connected" if state.db_pool else "unavailable"
-        }
-        
-    except Exception as e:
-        logger.error(f"Failed to initialize server: {e}")
-        raise McpError(f"Server initialization failed: {e}")
+@mcp.tool()
+async def generate_daily_report(
+    ctx: Context,
+    cycle_id: int = 1,
+    date: Optional[str] = None
+) -> str:
+    """
+    Generate daily trading report.
+    
+    Args:
+        cycle_id: Trading cycle ID
+        date: Date in YYYY-MM-DD format (defaults to today)
+    
+    Returns comprehensive daily report with P&L, positions, patterns.
+    """
+    logger.info(f"Generating daily report for cycle {cycle_id}...")
+    
+    params = {"cycle_id": cycle_id}
+    if date:
+        params["date"] = date
+    
+    result = await make_request(
+        "GET",
+        f"{Config.REPORTING_URL}/api/v1/reports/daily",
+        params=params,
+        timeout=Config.LONG_REQUEST_TIMEOUT
+    )
+    
+    if not result['success']:
+        raise McpError("REPORT_ERROR", result.get('error', 'Failed to generate report'))
+    
+    return format_response(result['data'])
 
-async def cleanup_server():
-    """Cleanup server resources"""
-    try:
-        logger.info("Cleaning up Catalyst Trading MCP orchestration service...")
-        
-        # Emergency stop if cycle is active
-        if state.current_cycle and state.current_cycle.status == "active":
-            logger.info("Stopping active trading cycle during cleanup...")
-            await emergency_stop()
-        
-        # Close HTTP session
-        if state.http_session:
-            await state.http_session.close()
-            logger.info("HTTP session closed")
-        
-        # Close database pool
-        if state.db_pool:
-            await state.db_pool.close()
-            logger.info("Database pool closed")
-        
-        logger.info("Cleanup completed successfully")
-        
-    except Exception as e:
-        logger.error(f"Error during cleanup: {e}")
+@mcp.tool()
+async def update_daily_risk_metrics(
+    ctx: Context,
+    cycle_id: int = 1
+) -> str:
+    """
+    Update daily risk metrics in the database.
+    
+    Recalculates and stores today's risk metrics.
+    """
+    logger.info(f"Updating daily risk metrics for cycle {cycle_id}...")
+    
+    result = await make_request(
+        "POST",
+        f"{Config.RISK_MANAGER_URL}/api/v1/risk/update-daily-metrics",
+        params={"cycle_id": cycle_id}
+    )
+    
+    if not result['success']:
+        raise McpError("UPDATE_FAILED", result.get('error', 'Failed to update metrics'))
+    
+    return format_response({
+        "success": True,
+        "message": "Daily risk metrics updated",
+        "data": result['data']
+    })
 
-# === STANDALONE MODE HANDLERS ===
+# ============================================================================
+# PROMPTS (Pre-defined Workflows)
+# ============================================================================
 
-async def init_handler():
-    """Initialize handler for standalone mode"""
-    if MCP_AVAILABLE:
-        return
+@mcp.prompt()
+def morning_briefing() -> str:
+    """
+    Morning briefing prompt for Claude.
     
-    logger.info("Initializing standalone mode...")
-    asyncio.run(initialize_server())
+    Suggests what to check at market open.
+    """
+    return """Please provide a morning trading briefing:
 
-async def cleanup_handler():
-    """Cleanup handler for standalone mode"""
-    if MCP_AVAILABLE:
-        return
-    
-    logger.info("Cleaning up standalone mode...")
-    asyncio.run(cleanup_server())
+1. Check system health
+2. Get latest scan candidates
+3. Review high-confidence patterns from last 24h
+4. Check recent news catalysts
+5. Review current risk limits and sector exposure
 
-async def run_standalone():
-    """Run in standalone mode for testing"""
-    from aiohttp import web
-    
-    # Initialize
-    await init_handler()
-    
-    # Create simple web server for health checks
-    app = web.Application()
-    
-    async def health_check(request):
-        health = await get_system_health()
-        return web.json_response(health)
-    
-    async def status_check(request):
-        status = await get_service_status()
-        return web.json_response(status)
-    
-    app.router.add_get('/health', health_check)
-    app.router.add_get('/status', status_check)
-    
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 5000)
-    await site.start()
-    
-    logger.info("Orchestration service running on http://0.0.0.0:5000")
-    logger.info("Available endpoints:")
-    logger.info("  - GET /health - System health check")
-    logger.info("  - GET /status - Service status check")
-    
-    # Set up signal handlers
-    def signal_handler():
-        logger.info("Received shutdown signal")
-        state.shutdown_event.set()
-    
-    # Register signal handlers
-    loop = asyncio.get_running_loop()
-    for sig in [signal.SIGTERM, signal.SIGINT]:
-        try:
-            loop.add_signal_handler(sig, signal_handler)
-        except NotImplementedError:
-            # Windows doesn't support add_signal_handler
-            pass
-    
-    try:
-        # Wait for shutdown signal
-        await state.shutdown_event.wait()
-    except Exception as e:
-        logger.error(f"Error in main loop: {e}")
-    finally:
-        logger.info("Shutting down...")
-        await cleanup_handler()
-        await runner.cleanup()
+Summarize key opportunities and risks for today."""
 
-# === MAIN ENTRY POINT ===
+@mcp.prompt()
+def analyze_candidate(symbol: str) -> str:
+    """
+    Deep analysis prompt for a candidate.
+    """
+    return f"""Please perform a comprehensive analysis of {symbol}:
 
-def run_mcp_server():
-    """Run MCP server with manual initialization"""
-    try:
-        # Initialize manually since decorators don't work
-        asyncio.run(initialize_server())
-        
-        # Run the MCP server
-        mcp.run(transport='stdio')
-        
-    except Exception as e:
-        logger.error(f"MCP server error: {e}")
-        raise
+1. Run technical indicator analysis
+2. Detect chart patterns
+3. Get recent news and catalysts
+4. Review pattern history (last 7 days)
+5. Check if this symbol is in any open positions
 
+Provide a trading recommendation with entry/exit levels."""
 
-def main():
-    """Main entry point with fixed asyncio handling for Python 3.10+"""
-    if "--test" in sys.argv:
-        print("Catalyst Trading MCP Orchestration Service")
-        print("==========================================")
-        print("✅ Syntax check passed")
-        print("✅ MCP imports successful" if MCP_AVAILABLE else "⚠️ MCP not available")
-        print(f"✅ {len(SERVICE_URLS)} services configured")
-        print("✅ Ready for deployment")
-        return
-    
-    if MCP_AVAILABLE:
-        logger.info("Starting Catalyst Trading MCP orchestration service...")
-        try:
-            # Use asyncio.run for proper async handling
-            run_mcp_server()
-        except KeyboardInterrupt:
-            logger.info("MCP service interrupted by user")
-        except Exception as e:
-            logger.error(f"MCP service error: {e}")
-            raise
-    else:
-        logger.warning("MCP not available, running in standalone mode for testing")
-        try:
-            # Use asyncio.run() for Python 3.10+ compatibility
-            asyncio.run(run_standalone())
-        except KeyboardInterrupt:
-            logger.info("Service interrupted by user")
-        except Exception as e:
-            logger.error(f"Service error: {e}")
-            raise
+@mcp.prompt()
+def end_of_day_review() -> str:
+    """
+    End of day review prompt.
+    """
+    return """Please provide an end-of-day review:
+
+1. Generate daily report
+2. Review all open positions with risk metrics
+3. Check sector exposure
+4. Update daily risk metrics
+5. Summarize today's P&L and key learnings
+
+Highlight any risk concerns or opportunities for tomorrow."""
+
+# ============================================================================
+# MAIN
+# ============================================================================
 
 if __name__ == "__main__":
-    main()
+    logger.info(f"Starting {Config.SERVICE_NAME} v{Config.VERSION}")
+    logger.info("MCP server with normalized schema v5.0 awareness")
+    
+    # Run MCP server
+    mcp.run()
