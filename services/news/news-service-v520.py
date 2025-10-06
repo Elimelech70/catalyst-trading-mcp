@@ -2,16 +2,11 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: news-service.py
-Version: 5.2.1
+Version: 5.2.0
 Last Updated: 2025-10-06
 Purpose: News catalyst detection with normalized schema v5.0
 
 REVISION HISTORY
-v5.2.1 (2025-10-06) - PORT CORRECTION
-- Fixed port from 5005 → 5008 (per design specifications)
-- Added SERVICE_PORT constant for single source of truth
-- All port references now use constant
-
 v5.2.0 (2025-10-06) 
 - SINGLE VERSION SOURCE: Version defined once, referenced everywhere
 - Fixed update_source_reliability() - no CAST needed for DECIMAL
@@ -54,15 +49,14 @@ from pathlib import Path
 # SERVICE METADATA (SINGLE SOURCE OF TRUTH)
 # ============================================================================
 SERVICE_NAME = "news"
-SERVICE_VERSION = "5.2.1"  # ← Incremented for port fix
+SERVICE_VERSION = "5.2.0"
 SERVICE_TITLE = "News Intelligence Service"
-SERVICE_PORT = 5008  # ← NEW: Port constant (per design spec)
 SCHEMA_VERSION = "v5.0 normalized"
 
 # Initialize FastAPI
 app = FastAPI(
     title=SERVICE_TITLE,
-    version=SERVICE_VERSION,
+    version=SERVICE_VERSION,  # ✅ References SERVICE_VERSION
     description=f"News catalyst detection with {SCHEMA_VERSION}"
 )
 
@@ -80,8 +74,8 @@ class JSONFormatter(logging.Formatter):
     def format(self, record):
         log_data = {
             "timestamp": datetime.utcnow().isoformat() + "Z",
-            "service": SERVICE_NAME,
-            "version": SERVICE_VERSION,
+            "service": SERVICE_NAME,  # ✅ References SERVICE_NAME
+            "version": SERVICE_VERSION,  # ✅ References SERVICE_VERSION
             "level": record.levelname,
             "message": record.getMessage(),
             "context": {
@@ -429,6 +423,7 @@ async def update_source_reliability():
         try:
             await asyncio.sleep(3600)  # Run hourly
             
+            # FIXED: No CAST needed - catalyst_strength is now DECIMAL(4,3)
             sources = await state.db_pool.fetch("""
                 SELECT 
                     source,
@@ -461,7 +456,8 @@ async def update_source_reliability():
             
         except Exception as e:
             logger.error(f"Source reliability update error: {e}", exc_info=True)
-            await asyncio.sleep(60)
+            await asyncio.sleep(60)  # Retry in 1 minute on error
+
 
 # === NEWS FETCHING ===
 async def fetch_newsapi(symbol: str, hours: int) -> List[Dict]:
@@ -510,6 +506,7 @@ async def fetch_newsapi(symbol: str, hours: int) -> List[Dict]:
 # === STARTUP ===
 @app.on_event("startup")
 async def startup_event():
+    # ✅ References SERVICE_TITLE and SERVICE_VERSION
     logger.info(f"Starting {SERVICE_TITLE} v{SERVICE_VERSION} ({SCHEMA_VERSION})")
     
     ticker_mapper.load_mappings()
@@ -551,31 +548,15 @@ async def shutdown_event():
 # === HEALTH CHECK ===
 @app.get("/health")
 async def health_check():
+    # ✅ References SERVICE_NAME, SERVICE_VERSION, SCHEMA_VERSION
     return {
         "status": "healthy",
         "service": SERVICE_NAME,
         "version": SERVICE_VERSION,
         "schema": SCHEMA_VERSION,
         "timestamp": datetime.utcnow().isoformat() + "Z",
-        "database": "connected" if state.db_pool else "disconnected",
-        "ticker_mappings": len(ticker_mapper.mappings)
+        "database": "connected" if state.db_pool else "disconnected"
     }
-
-# === ADMIN ENDPOINT ===
-@app.post("/admin/reload-mappings")
-async def reload_ticker_mappings():
-    """Hot-reload ticker mappings from config file (no restart needed)"""
-    try:
-        ticker_mapper.reload()
-        return {
-            "status": "success",
-            "message": "Ticker mappings reloaded",
-            "count": len(ticker_mapper.mappings),
-            "timestamp": datetime.utcnow().isoformat() + "Z"
-        }
-    except Exception as e:
-        logger.error(f"Failed to reload mappings: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Reload failed: {str(e)}")
 
 # === API ENDPOINT ===
 @app.get("/api/v1/catalysts/{symbol}")
@@ -632,14 +613,14 @@ async def get_catalysts(symbol: str, hours: int = 24, min_strength: float = 0.3)
 if __name__ == "__main__":
     import uvicorn
     
-    # ✅ Now uses SERVICE_PORT constant
+    # ✅ References SERVICE_TITLE, SERVICE_VERSION, SCHEMA_VERSION
     print("=" * 70)
     print(f"🎩 Catalyst Trading System - {SERVICE_TITLE} v{SERVICE_VERSION}")
     print("=" * 70)
     print(f"✅ {SCHEMA_VERSION} with FKs")
     print("✅ Price impact tracking")
     print("✅ Source reliability scoring")
-    print(f"Port: {SERVICE_PORT}")  # ← FIXED: Uses constant
+    print("Port: 5005")
     print("=" * 70)
     
-    uvicorn.run(app, host="0.0.0.0", port=SERVICE_PORT, log_level="info")  # ← FIXED: Uses constant
+    uvicorn.run(app, host="0.0.0.0", port=5005, log_level="info")

@@ -2,11 +2,16 @@
 
 # Name of Application: Catalyst Trading System
 # Name of file: scanner-service.py
-# Version: 5.2.0
+# Version: 5.3.0
 # Last Updated: 2025-10-06
 # Purpose: Scanner service with NORMALIZED schema v5.0 (security_id + time_id FKs)
 
 # REVISION HISTORY:
+# v5.3.0 (2025-10-06) - DRY Principle Applied
+# - Single version source (SERVICE_VERSION constant)
+# - All version references use constants
+# - No hardcoded versions in code
+# 
 # v5.2.0 (2025-10-06) - NORMALIZED SCHEMA MIGRATION (Playbook v3.0 Step 2)
 # - Uses security_id FK (NOT symbol VARCHAR) ✅
 # - Uses time_id FK for timestamps (NOT duplicate timestamps) ✅
@@ -47,11 +52,20 @@ import yfinance as yf
 import redis.asyncio as redis
 import uvicorn
 
+# ============================================================================
+# SERVICE METADATA (SINGLE SOURCE OF TRUTH)
+# ============================================================================
+SERVICE_NAME = "scanner"
+SERVICE_VERSION = "5.3.0"
+SERVICE_TITLE = "Scanner Service"
+SCHEMA_VERSION = "v5.0 normalized"
+SERVICE_PORT = 5001
+
 # Initialize FastAPI
 app = FastAPI(
-    title="Scanner Service",
-    version="5.2.0",
-    description="Market scanner with normalized schema v5.0"
+    title=SERVICE_TITLE,
+    version=SERVICE_VERSION,
+    description=f"Market scanner with {SCHEMA_VERSION}"    
 )
 
 # CORS
@@ -65,7 +79,7 @@ app.add_middleware(
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("scanner")
+logger = logging.getLogger(SERVICE_NAME)
 
 # === SERVICE STATE ===
 @dataclass
@@ -361,7 +375,7 @@ async def scan_market() -> Dict:
 # === STARTUP ===
 @app.on_event("startup")
 async def startup_event():
-    logger.info("Starting Scanner Service v5.2.0 (NORMALIZED SCHEMA)")
+    logger.info(f"Starting {SERVICE_TITLE} v{SERVICE_VERSION} ({SCHEMA_VERSION})")
     
     # Database
     try:
@@ -390,7 +404,7 @@ async def startup_event():
     # HTTP session
     state.http_session = aiohttp.ClientSession()
     
-    logger.info("Scanner service ready")
+    logger.info(f"{SERVICE_TITLE} ready")
 
 async def verify_normalized_schema():
     """Verify normalized schema v5.0 is deployed"""
@@ -438,9 +452,9 @@ async def shutdown_event():
 async def health_check():
     return {
         "status": "healthy",
-        "service": "scanner",
-        "version": "5.2.0",
-        "schema": "v5.0 normalized",
+        "service": SERVICE_NAME,
+        "version": SERVICE_VERSION,
+        "schema": SCHEMA_VERSION,
         "uses_security_id_fk": True,
         "uses_time_id_fk": True,
         "timestamp": datetime.utcnow().isoformat(),
@@ -511,14 +525,15 @@ async def get_candidates(cycle_id: Optional[str] = None, limit: int = 10):
 
 if __name__ == "__main__":
     print("=" * 70)
-    print("🎩 Catalyst Trading System - Scanner Service v5.2.0 (NORMALIZED)")
+    print(f"🎩 Catalyst Trading System - {SERVICE_TITLE} v{SERVICE_VERSION}")
     print("=" * 70)
+    print(f"✅ {SCHEMA_VERSION} with FKs")
     print("✅ Uses security_id FK (NOT symbol VARCHAR)")
     print("✅ Uses time_id FK (NOT duplicate timestamps)")
     print("✅ Queries news_sentiment with JOINs for catalysts")
     print("✅ All queries use JOINs on FKs")
     print("✅ NO data duplication - single source of truth")
-    print("Port: 5001")
+    print(f"Port: {SERVICE_PORT}")
     print("=" * 70)
     
-    uvicorn.run(app, host="0.0.0.0", port=5001, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=SERVICE_PORT, log_level="info")
