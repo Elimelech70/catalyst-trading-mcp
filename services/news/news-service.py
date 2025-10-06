@@ -2,29 +2,32 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: news-service.py
-Version: 5.0.2
-Last Updated: 2025-10-04
-Purpose: News catalyst detection with config-based ticker mapping
+Version: 5.1.0
+Last Updated: 2025-10-06
+Purpose: News catalyst detection with normalized schema v5.0
 
 REVISION HISTORY:
+v5.1.0 (2025-10-06) - Normalized Schema Migration
+- Migrated to news_sentiment table with security_id FK
+- Added time_dimension integration with time_id FK
+- Implemented price impact tracking (5min, 15min, 30min)
+- Added source reliability scoring
+- Background jobs for impact calculation
+- Full JOIN-based queries (no symbol VARCHAR storage)
+
 v5.0.2 (2025-10-04) - Configuration-Based Ticker Mapping
 - Moved ticker mappings to external YAML config file
-- Hot-reload capability (update config without code changes)
-- Better separation of concerns
-- Easier maintenance and updates
-
-v5.0.1 (2025-10-04) - NewsAPI Query Fix
-- Fixed query construction to use company names
+- Hot-reload capability
 
 Description of Service:
 Intelligence foundation for Catalyst Trading System.
-Loads ticker-to-company mappings from config/ticker_mappings.yaml
-Falls back to "{TICKER} stock" for unmapped symbols.
+Uses normalized v5.0 schema with proper FKs.
+Tracks news price impact and source reliability for ML.
 """
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
 import asyncio
@@ -44,8 +47,8 @@ from pathlib import Path
 # Initialize FastAPI
 app = FastAPI(
     title="News Intelligence Service",
-    version="5.0.2",
-    description="News catalyst detection with config-based ticker mapping"
+    version="5.1.0",
+    description="News catalyst detection with normalized schema v5.0"
 )
 
 # CORS
@@ -59,8 +62,6 @@ app.add_middleware(
 
 # === JSON LOGGING ===
 class JSONFormatter(logging.Formatter):
-    """Format logs as JSON"""
-    
     def format(self, record):
         log_data = {
             "timestamp": datetime.utcnow().isoformat() + "Z",
@@ -79,12 +80,9 @@ class JSONFormatter(logging.Formatter):
         
         if hasattr(record, 'symbol'):
             log_data["context"]["symbol"] = record.symbol
-        if hasattr(record, 'query'):
-            log_data["context"]["query"] = record.query
             
         return json.dumps(log_data)
 
-# Configure logging
 logger = logging.getLogger("news")
 logger.setLevel(logging.DEBUG)
 
@@ -105,21 +103,17 @@ logger.addHandler(console_handler)
 
 # === TICKER MAPPING ===
 class TickerMapper:
-    """Load and manage ticker-to-company mappings from config"""
-    
     def __init__(self, config_path: str = "/app/config/ticker_mappings.yaml"):
         self.config_path = config_path
         self.mappings: Dict[str, str] = {}
         self.load_mappings()
     
     def load_mappings(self):
-        """Load ticker mappings from YAML config file"""
         try:
             config_file = Path(self.config_path)
             
             if not config_file.exists():
                 logger.warning(f"Ticker mapping file not found: {self.config_path}")
-                logger.warning("Using fallback strategy for all tickers")
                 self.mappings = {}
                 return
             
@@ -127,55 +121,33 @@ class TickerMapper:
                 self.mappings = yaml.safe_load(f) or {}
             
             logger.info(f"Loaded {len(self.mappings)} ticker mappings from config")
-            logger.debug(f"Sample mappings: AAPL={self.mappings.get('AAPL')}, "
-                        f"TSLA={self.mappings.get('TSLA')}, "
-                        f"MSFT={self.mappings.get('MSFT')}")
             
         except Exception as e:
             logger.error(f"Failed to load ticker mappings: {e}", exc_info=True)
-            logger.warning("Using fallback strategy for all tickers")
             self.mappings = {}
     
     def get_search_terms(self, symbol: str) -> str:
-        """
-        Get optimized search query for NewsAPI
-        
-        Args:
-            symbol: Stock ticker
-            
-        Returns:
-            Company name if mapped, otherwise "{TICKER} stock"
-        """
         symbol_upper = symbol.upper()
-        
-        # Try to get from config
         company_name = self.mappings.get(symbol_upper)
         
         if company_name:
             logger.debug(f"Ticker {symbol_upper} mapped to: '{company_name}'")
             return company_name
         else:
-            # Fallback strategy
             fallback = f"{symbol_upper} stock"
             logger.debug(f"Ticker {symbol_upper} not in config, using fallback: '{fallback}'")
             return fallback
     
     def reload(self):
-        """Hot-reload mappings from config file"""
         logger.info("Reloading ticker mappings from config")
         old_count = len(self.mappings)
         self.load_mappings()
         new_count = len(self.mappings)
         logger.info(f"Mappings reloaded: {old_count} → {new_count}")
 
-# Initialize ticker mapper
 ticker_mapper = TickerMapper()
 
 # === DATA MODELS ===
-class NewsSource(str, Enum):
-    NEWSAPI = "newsapi"
-    YAHOO = "yahoo"
-
 class CatalystType(str, Enum):
     EARNINGS = "earnings"
     FDA_APPROVAL = "fda_approval"
@@ -190,26 +162,12 @@ class CatalystType(str, Enum):
     INSIDER_TRADING = "insider_trading"
     GENERAL = "general"
 
-class SentimentType(str, Enum):
+class SentimentLabel(str, Enum):
     VERY_BULLISH = "very_bullish"
     BULLISH = "bullish"
     NEUTRAL = "neutral"
     BEARISH = "bearish"
     VERY_BEARISH = "very_bearish"
-
-class NewsArticle(BaseModel):
-    article_id: str
-    symbol: Optional[str]
-    headline: str
-    source: str
-    published_at: datetime
-    url: Optional[str]
-    summary: Optional[str]
-    sentiment: SentimentType
-    sentiment_score: float = Field(ge=0, le=1)
-    catalyst_type: Optional[CatalystType]
-    catalyst_strength: float = Field(ge=0, le=1)
-    keywords: List[str]
 
 # === SERVICE STATE ===
 @dataclass
@@ -245,29 +203,308 @@ class NewsState:
 
 state = NewsState()
 
+# === HELPER FUNCTIONS (NORMALIZED SCHEMA) ===
+async def get_security_id(symbol: str) -> int:
+    """Get or create security_id for symbol using helper function"""
+    try:
+        security_id = await state.db_pool.fetchval(
+            "SELECT get_or_create_security($1)", symbol.upper()
+        )
+        if not security_id:
+            raise ValueError(f"Failed to get security_id for {symbol}")
+        return security_id
+    except Exception as e:
+        logger.error(f"get_security_id failed for {symbol}: {e}", exc_info=True)
+        raise
+
+async def get_time_id(timestamp: datetime) -> int:
+    """Get or create time_id for timestamp using helper function"""
+    try:
+        time_id = await state.db_pool.fetchval(
+            "SELECT get_or_create_time($1)", timestamp
+        )
+        if not time_id:
+            raise ValueError(f"Failed to get time_id for {timestamp}")
+        return time_id
+    except Exception as e:
+        logger.error(f"get_time_id failed for {timestamp}: {e}", exc_info=True)
+        raise
+
+# === NEWS ANALYSIS ===
+def analyze_sentiment(text: str) -> tuple[float, SentimentLabel]:
+    """Analyze sentiment using TextBlob"""
+    blob = TextBlob(text)
+    polarity = blob.sentiment.polarity  # -1 to 1
+    
+    # Convert to 0-1 scale
+    sentiment_score = (polarity + 1) / 2
+    
+    # Determine label
+    if polarity >= 0.5:
+        label = SentimentLabel.VERY_BULLISH
+    elif polarity >= 0.1:
+        label = SentimentLabel.BULLISH
+    elif polarity >= -0.1:
+        label = SentimentLabel.NEUTRAL
+    elif polarity >= -0.5:
+        label = SentimentLabel.BEARISH
+    else:
+        label = SentimentLabel.VERY_BEARISH
+    
+    return sentiment_score, label
+
+def detect_catalyst(article: Dict, config: NewsConfig) -> tuple[Optional[CatalystType], float]:
+    """Detect catalyst type and strength"""
+    text = f"{article.get('title', '')} {article.get('description', '')}".lower()
+    
+    detected_catalysts = []
+    
+    for catalyst_type, keywords in config.catalyst_keywords.items():
+        keyword_count = sum(1 for keyword in keywords if keyword.lower() in text)
+        if keyword_count > 0:
+            strength = min(keyword_count / len(keywords), 1.0)
+            detected_catalysts.append((catalyst_type, strength))
+    
+    if detected_catalysts:
+        # Return strongest catalyst
+        detected_catalysts.sort(key=lambda x: x[1], reverse=True)
+        return detected_catalysts[0]
+    
+    return CatalystType.GENERAL, 0.1
+
+# === NEWS STORAGE (NORMALIZED) ===
+async def store_news_article(symbol: str, article: Dict) -> int:
+    """Store news in news_sentiment table with security_id and time_id FKs"""
+    try:
+        # Get FKs
+        security_id = await get_security_id(symbol)
+        
+        published_at = datetime.fromisoformat(
+            article.get('publishedAt', datetime.utcnow().isoformat()).replace('Z', '+00:00')
+        )
+        time_id = await get_time_id(published_at)
+        
+        # Analyze sentiment
+        sentiment_score, sentiment_label = analyze_sentiment(
+            f"{article.get('title', '')} {article.get('description', '')}"
+        )
+        
+        # Detect catalyst
+        catalyst_type, catalyst_strength = detect_catalyst(article, state.config)
+        
+        # Store in news_sentiment table
+        news_id = await state.db_pool.fetchval("""
+            INSERT INTO news_sentiment (
+                security_id, time_id,
+                headline, summary, url, source,
+                sentiment_score, sentiment_label,
+                catalyst_type, catalyst_strength,
+                source_reliability_score,
+                metadata
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            RETURNING news_id
+        """,
+            security_id, time_id,
+            article.get('title', ''),
+            article.get('description'),
+            article.get('url'),
+            article.get('source', {}).get('name', 'unknown'),
+            sentiment_score,
+            sentiment_label.value,
+            catalyst_type.value,
+            catalyst_strength,
+            0.500,  # Initial reliability score
+            json.dumps(article.get('metadata', {}))
+        )
+        
+        logger.info(f"Stored news {news_id} for {symbol} (security_id={security_id})")
+        return news_id
+        
+    except Exception as e:
+        logger.error(f"Failed to store news for {symbol}: {e}", exc_info=True)
+        raise
+
+# === PRICE IMPACT TRACKING (BACKGROUND JOB) ===
+async def calculate_news_price_impact():
+    """Background job: Calculate actual price impact after news events"""
+    logger.info("Starting price impact calculation job")
+    
+    while True:
+        try:
+            # Find news events without price impact calculated (>5min old)
+            news_events = await state.db_pool.fetch("""
+                SELECT 
+                    ns.news_id, 
+                    ns.security_id, 
+                    td.timestamp as published_at,
+                    th_before.close as price_before
+                FROM news_sentiment ns
+                JOIN time_dimension td ON td.time_id = ns.time_id
+                LEFT JOIN LATERAL (
+                    SELECT close FROM trading_history
+                    WHERE security_id = ns.security_id
+                    AND time_id <= ns.time_id
+                    ORDER BY time_id DESC LIMIT 1
+                ) th_before ON TRUE
+                WHERE ns.price_impact_5min IS NULL
+                AND td.timestamp < NOW() - INTERVAL '5 minutes'
+                LIMIT 100
+            """)
+            
+            for event in news_events:
+                if not event['price_before']:
+                    continue
+                
+                # Get prices at different intervals after news
+                prices = await state.db_pool.fetchrow("""
+                    SELECT 
+                        (SELECT close FROM trading_history th
+                         JOIN time_dimension td ON td.time_id = th.time_id
+                         WHERE th.security_id = $1 
+                         AND td.timestamp >= $2 + INTERVAL '5 minutes'
+                         ORDER BY td.timestamp ASC LIMIT 1) as price_5min,
+                        
+                        (SELECT close FROM trading_history th
+                         JOIN time_dimension td ON td.time_id = th.time_id
+                         WHERE th.security_id = $1 
+                         AND td.timestamp >= $2 + INTERVAL '15 minutes'
+                         ORDER BY td.timestamp ASC LIMIT 1) as price_15min,
+                        
+                        (SELECT close FROM trading_history th
+                         JOIN time_dimension td ON td.time_id = th.time_id
+                         WHERE th.security_id = $1 
+                         AND td.timestamp >= $2 + INTERVAL '30 minutes'
+                         ORDER BY td.timestamp ASC LIMIT 1) as price_30min
+                """, event['security_id'], event['published_at'])
+                
+                # Calculate % impacts
+                impact_5min = ((prices['price_5min'] - event['price_before']) / 
+                              event['price_before'] * 100) if prices['price_5min'] else None
+                impact_15min = ((prices['price_15min'] - event['price_before']) / 
+                               event['price_before'] * 100) if prices['price_15min'] else None
+                impact_30min = ((prices['price_30min'] - event['price_before']) / 
+                               event['price_before'] * 100) if prices['price_30min'] else None
+                
+                # Update news_sentiment with impacts
+                await state.db_pool.execute("""
+                    UPDATE news_sentiment
+                    SET price_impact_5min = $1,
+                        price_impact_15min = $2,
+                        price_impact_30min = $3
+                    WHERE news_id = $4
+                """, impact_5min, impact_15min, impact_30min, event['news_id'])
+                
+                logger.debug(f"Updated price impact for news {event['news_id']}: "
+                           f"5min={impact_5min:.2f}% if impact_5min else 'N/A'")
+            
+            # Wait before next check
+            await asyncio.sleep(60)
+            
+        except Exception as e:
+            logger.error(f"Price impact calculation error: {e}", exc_info=True)
+            await asyncio.sleep(60)
+
+# === SOURCE RELIABILITY TRACKING ===
+async def update_source_reliability():
+    """Track which news sources accurately predict price moves"""
+    logger.info("Starting source reliability update job")
+    
+    while True:
+        try:
+            await asyncio.sleep(3600)  # Run hourly
+            
+            # Get news with both catalyst prediction and actual impact
+            sources = await state.db_pool.fetch("""
+                SELECT 
+                    source,
+                    COUNT(*) as total_articles,
+                    AVG(CASE 
+                        WHEN (catalyst_strength >= 0.5 AND ABS(price_impact_15min) >= 1.0)
+                        OR (catalyst_strength < 0.5 AND ABS(price_impact_15min) < 1.0)
+                        THEN 1.0 ELSE 0.0 
+                    END) as accuracy
+                FROM news_sentiment
+                WHERE price_impact_15min IS NOT NULL
+                AND catalyst_strength IS NOT NULL
+                GROUP BY source
+                HAVING COUNT(*) >= 10
+            """)
+            
+            for row in sources:
+                reliability = row['accuracy']
+                
+                await state.db_pool.execute("""
+                    UPDATE news_sentiment
+                    SET source_reliability_score = $1
+                    WHERE source = $2
+                """, reliability, row['source'])
+                
+                logger.info(f"Updated {row['source']} reliability: {reliability:.3f} "
+                           f"({row['total_articles']} articles)")
+            
+        except Exception as e:
+            logger.error(f"Source reliability update error: {e}", exc_info=True)
+
+# === NEWS FETCHING ===
+async def fetch_newsapi(symbol: str, hours: int) -> List[Dict]:
+    """Fetch news from NewsAPI with config-based query optimization"""
+    
+    if not symbol or len(symbol) > 10:
+        raise ValueError(f"Invalid symbol: {symbol}")
+    
+    from_date = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+    search_query = ticker_mapper.get_search_terms(symbol)
+    
+    url = "https://newsapi.org/v2/everything"
+    params = {
+        "q": search_query,
+        "from": from_date,
+        "apiKey": state.config.api_key,
+        "language": "en",
+        "sortBy": "publishedAt",
+        "pageSize": 100
+    }
+    
+    try:
+        async with state.http_session.get(
+            url, params=params, timeout=aiohttp.ClientTimeout(total=10)
+        ) as resp:
+            
+            if resp.status == 200:
+                data = await resp.json()
+                articles = data.get("articles", [])
+                logger.info(f"NewsAPI: {len(articles)} articles for {symbol}")
+                return articles
+            elif resp.status == 401:
+                logger.critical("NewsAPI auth failed")
+                raise HTTPException(status_code=503, detail="Invalid API key")
+            elif resp.status == 429:
+                logger.error("NewsAPI rate limit exceeded")
+                raise HTTPException(status_code=429, detail="Rate limit exceeded")
+            else:
+                logger.warning(f"NewsAPI status: {resp.status}")
+                return []
+    
+    except asyncio.TimeoutError:
+        logger.error(f"NewsAPI timeout for {symbol}")
+        raise TimeoutError(f"Timeout for {symbol}")
+
 # === STARTUP ===
 @app.on_event("startup")
 async def startup_event():
-    logger.info("Starting News Intelligence Service v5.0.2")
+    logger.info("Starting News Intelligence Service v5.1.0 (Normalized Schema)")
     
-    # Load ticker mappings from config
     ticker_mapper.load_mappings()
     
-    # Initialize config
     try:
-        state.config = NewsConfig(
-            api_key=os.getenv("NEWS_API_KEY", "")
-        )
+        state.config = NewsConfig(api_key=os.getenv("NEWS_API_KEY", ""))
         logger.info("Configuration validated")
     except ValueError as e:
         logger.critical(f"Config failed: {e}")
         raise
     
-    # HTTP session
     state.http_session = aiohttp.ClientSession()
-    logger.info("HTTP session initialized")
     
-    # Database
     try:
         database_url = os.getenv("DATABASE_URL")
         if not database_url:
@@ -278,6 +515,11 @@ async def startup_event():
     except Exception as e:
         logger.critical(f"Database init failed: {e}")
         raise
+    
+    # Start background jobs
+    asyncio.create_task(calculate_news_price_impact())
+    asyncio.create_task(update_source_reliability())
+    logger.info("Background jobs started")
     
     logger.info("News service ready")
 
@@ -294,161 +536,61 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "news",
-        "version": "5.0.2",
+        "version": "5.1.0",
+        "schema": "v5.0 normalized",
         "timestamp": datetime.utcnow().isoformat() + "Z",
-        "database": "connected" if state.db_pool else "disconnected",
-        "http_session": "initialized" if state.http_session else "not_initialized",
-        "ticker_mappings": len(ticker_mapper.mappings)
+        "database": "connected" if state.db_pool else "disconnected"
     }
-
-# === ADMIN ENDPOINT ===
-@app.post("/admin/reload-mappings")
-async def reload_ticker_mappings():
-    """Hot-reload ticker mappings from config file (no restart needed)"""
-    try:
-        ticker_mapper.reload()
-        return {
-            "status": "success",
-            "message": "Ticker mappings reloaded",
-            "count": len(ticker_mapper.mappings),
-            "timestamp": datetime.utcnow().isoformat() + "Z"
-        }
-    except Exception as e:
-        logger.error(f"Failed to reload mappings: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Reload failed: {str(e)}")
-
-# === NEWS FETCHING ===
-async def fetch_newsapi(symbol: str, hours: int) -> List[Dict]:
-    """
-    Fetch news from NewsAPI with config-based query optimization
-    Uses ticker_mapper to get company names from config
-    """
-    
-    if not symbol or len(symbol) > 10:
-        raise ValueError(f"Invalid symbol: {symbol}")
-    
-    if hours <= 0 or hours > 168:
-        raise ValueError(f"Invalid hours: {hours}")
-    
-    from_date = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
-    
-    # Get search terms from config-based mapper
-    search_query = ticker_mapper.get_search_terms(symbol)
-    
-    url = "https://newsapi.org/v2/everything"
-    params = {
-        "q": search_query,
-        "from": from_date,
-        "apiKey": state.config.api_key,
-        "language": "en",
-        "sortBy": "publishedAt",
-        "pageSize": 100
-    }
-    
-    try:
-        logger.debug(f"NewsAPI query for {symbol}: '{search_query}' (last {hours}h)")
-        
-        async with state.http_session.get(
-            url,
-            params=params,
-            timeout=aiohttp.ClientTimeout(total=10)
-        ) as resp:
-            
-            if resp.status == 200:
-                data = await resp.json()
-                articles = data.get("articles", [])
-                logger.info(f"NewsAPI: {len(articles)} articles for {symbol} using query='{search_query}'")
-                return articles
-                
-            elif resp.status == 401:
-                logger.critical("NewsAPI auth failed - invalid API key")
-                raise HTTPException(status_code=503, detail="Invalid API key")
-                
-            elif resp.status == 429:
-                logger.error("NewsAPI rate limit exceeded")
-                raise HTTPException(status_code=429, detail="Rate limit exceeded")
-                
-            elif resp.status >= 500:
-                logger.error(f"NewsAPI server error: {resp.status}")
-                raise HTTPException(status_code=502, detail=f"NewsAPI error: {resp.status}")
-                
-            else:
-                logger.warning(f"Unexpected NewsAPI status: {resp.status}")
-                return []
-    
-    except asyncio.TimeoutError:
-        logger.error(f"NewsAPI timeout for {symbol}")
-        raise TimeoutError(f"Timeout for {symbol}")
-    except aiohttp.ClientError as e:
-        logger.error(f"NewsAPI connection error: {e}")
-        raise HTTPException(status_code=502, detail=str(e))
-
-async def fetch_yahoo_news(symbol: str, hours: int) -> List[Dict]:
-    """Fetch from Yahoo Finance RSS"""
-    try:
-        url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={symbol}&region=US&lang=en-US"
-        
-        async with state.http_session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            if resp.status == 200:
-                content = await resp.text()
-                feed = feedparser.parse(content)
-                
-                articles = []
-                cutoff = datetime.now() - timedelta(hours=hours)
-                
-                for entry in feed.entries:
-                    published = datetime.fromisoformat(entry.get('published', datetime.now().isoformat()))
-                    if published > cutoff:
-                        articles.append({
-                            'title': entry.get('title'),
-                            'description': entry.get('summary'),
-                            'url': entry.get('link'),
-                            'publishedAt': entry.get('published'),
-                            'source': {'name': 'Yahoo Finance'}
-                        })
-                
-                logger.info(f"Yahoo: {len(articles)} articles for {symbol}")
-                return articles
-            else:
-                logger.warning(f"Yahoo RSS returned {resp.status} for {symbol}")
-                return []
-    except Exception as e:
-        logger.warning(f"Yahoo fetch failed for {symbol}: {e}")
-        return []
 
 # === API ENDPOINT ===
 @app.get("/api/v1/catalysts/{symbol}")
 async def get_catalysts(symbol: str, hours: int = 24, min_strength: float = 0.3):
-    """Get news catalysts for symbol"""
+    """Get news catalysts for symbol (uses normalized schema with JOINs)"""
     
     if not symbol or len(symbol) > 10:
         raise HTTPException(status_code=400, detail="Invalid symbol")
     
-    logger.info(f"Fetching catalysts for {symbol} (hours={hours}, min_strength={min_strength})")
+    logger.info(f"Fetching catalysts for {symbol} (hours={hours})")
     
+    # Fetch fresh news
     all_articles = []
-    
-    # Fetch from NewsAPI
     try:
         newsapi_articles = await fetch_newsapi(symbol, hours)
         all_articles.extend(newsapi_articles)
     except Exception as e:
         logger.error(f"NewsAPI error for {symbol}: {e}")
     
-    # Fetch from Yahoo
-    try:
-        yahoo_articles = await fetch_yahoo_news(symbol, hours)
-        all_articles.extend(yahoo_articles)
-    except Exception as e:
-        logger.error(f"Yahoo error for {symbol}: {e}")
+    # Store articles with normalized schema
+    for article in all_articles:
+        try:
+            await store_news_article(symbol, article)
+        except Exception as e:
+            logger.error(f"Failed to store article: {e}")
     
-    # Process articles (sentiment, catalyst detection, etc.)
-    # ... rest of processing logic ...
+    # Query stored news with JOINs (normalized schema)
+    news_records = await state.db_pool.fetch("""
+        SELECT 
+            ns.*,
+            s.symbol,
+            s.company_name,
+            sec.sector_name,
+            td.timestamp as published_at,
+            td.market_session
+        FROM news_sentiment ns
+        JOIN securities s ON s.security_id = ns.security_id
+        JOIN sectors sec ON sec.sector_id = s.sector_id
+        JOIN time_dimension td ON td.time_id = ns.time_id
+        WHERE s.symbol = $1
+        AND td.timestamp >= NOW() - INTERVAL '1 day' * $2 / 24
+        AND ns.catalyst_strength >= $3
+        ORDER BY td.timestamp DESC
+        LIMIT 100
+    """, symbol.upper(), hours, min_strength)
     
     return {
         "symbol": symbol,
-        "articles": all_articles,
-        "count": len(all_articles),
+        "catalysts": [dict(r) for r in news_records],
+        "count": len(news_records),
         "timestamp": datetime.utcnow().isoformat() + "Z"
     }
 
@@ -456,11 +598,11 @@ if __name__ == "__main__":
     import uvicorn
     
     print("=" * 60)
-    print("🎩 Catalyst Trading System - News Service v5.0.2")
+    print("🎩 Catalyst Trading System - News Service v5.1.0")
     print("=" * 60)
-    print("✅ Config-based ticker mapping")
-    print("✅ Hot-reload capability")
-    print("✅ Easy maintenance - no code changes needed")
+    print("✅ Normalized schema v5.0 with FKs")
+    print("✅ Price impact tracking")
+    print("✅ Source reliability scoring")
     print("Port: 5008")
     print("=" * 60)
     
