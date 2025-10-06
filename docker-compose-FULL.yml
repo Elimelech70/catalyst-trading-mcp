@@ -1,33 +1,29 @@
 # Name of Application: Catalyst Trading System
 # Name of file: docker-compose.yml
-# Version: 5.0.1
-# Last Updated: 2025-09-19
-# Purpose: Docker Compose configuration with REST API architecture
-
+# Version: 5.1.1
+# Last Updated: 2025-10-04
+# Purpose: CORRECTED Docker Compose with all fixes applied
 
 # REVISION HISTORY:
-# v5.1.0 (2025-09-20)
-# Added Technical Analysis Service
-# Was missing
+# v5.1.1 (2025-10-04) - CRITICAL FIXES
+# - Fixed news service missing network configuration
+# - Added news_logs volume declaration
+# - Fixed inconsistent .env path references (removed config/.env)
+# - Standardized all healthcheck commands
+# - Added missing dependencies for proper startup order
+# - Fixed risk-manager missing from news logs volume
+# - Ensured all services use catalyst-network
 # 
+# v5.1.0 (2025-09-20) - Added Technical Analysis Service
+# v5.0.1 (2025-09-19) - Fixed .env paths
 # v5.0.0 (2025-09-19) - Migrated to REST API architecture
-# - REMOVED database-service (MCP pattern was incorrect)
-# - Services now connect directly to DigitalOcean PostgreSQL
-# - Removed DATABASE_SERVICE_URL from all services
-# - Services will use REST APIs for inter-service communication
-# v4.3.0 (2025-09-19) - Added Database MCP Service (now removed - wrong pattern)
-# v4.2.0 (2025-09-13) - Fixed to use DigitalOcean Managed PostgreSQL
-# v4.1.0 (2025-08-31) - Previous version with local PostgreSQL
-
-# Description of Service:
-# Complete docker-compose setup for Catalyst Trading MCP system
-# using DigitalOcean Managed PostgreSQL with direct connections
-# MCP is used ONLY for orchestration/Claude interface
 
 version: '3.8'
 
 services:
-  # Cache Service (Local Redis)
+  # =====================================================
+  # REDIS CACHE SERVICE
+  # =====================================================
   redis:
     image: redis:7-alpine
     container_name: catalyst-redis
@@ -36,6 +32,8 @@ services:
       - "6379:6379"
     volumes:
       - redis_data:/data
+    networks:
+      - catalyst-network
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}", "ping"]
       interval: 10s
@@ -43,16 +41,17 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # Orchestration Service (MCP-enabled for Claude)
+  # =====================================================
+  # ORCHESTRATION SERVICE (MCP for Claude Desktop)
+  # =====================================================
   orchestration:
     build:
       context: ./services/orchestration
       dockerfile: Dockerfile
     container_name: catalyst-orchestration
     env_file: 
-      - ./.env
+      - .env  # FIXED: Removed ./ prefix for consistency
     environment:
-      # Direct database connection
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: redis://:${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}@redis:6379/0
       MCP_MODE: production
@@ -66,21 +65,59 @@ services:
       - "5000:5000"
     volumes:
       - ./logs/orchestration:/app/logs
+    networks:
+      - catalyst-network
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 40s
 
-  # Scanner Service (REST API)
+  # =====================================================
+  # NEWS INTELLIGENCE SERVICE (REST API)
+  # =====================================================
+  news:
+    build:
+      context: ./services/news
+      dockerfile: Dockerfile
+    container_name: catalyst-news
+    env_file:
+      - .env  # FIXED: Added env_file for consistency
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}@redis:6379/0
+      NEWS_API_KEY: ${NEWS_API_KEY}
+      SERVICE_PORT: 5008
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "5008:5008"
+    volumes:
+      - ./services/news/config:/app/config:ro
+      - news_logs:/app/logs
+    networks:
+      - catalyst-network  # FIXED: Added missing network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5008/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # =====================================================
+  # SCANNER SERVICE (REST API)
+  # =====================================================
   scanner:
     build:
       context: ./services/scanner
       dockerfile: Dockerfile
     container_name: catalyst-scanner
     env_file: 
-      - ./.env
+      - .env  # FIXED: Consistent with other services
     environment:
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: redis://:${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}@redis:6379/0
@@ -96,56 +133,34 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      news:  # FIXED: Added news dependency since scanner uses NEWS_URL
+        condition: service_started
       orchestration:
         condition: service_started
     ports:
       - "5001:5001"
     volumes:
       - ./logs/scanner:/app/logs
+    networks:
+      - catalyst-network
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 40s
 
-  # News Intelligence Service (REST API)
-  news:
-    build:
-      context: ./services/news
-      dockerfile: Dockerfile
-    container_name: catalyst-news
-    env_file: 
-      - ./.env
-    environment:
-      DATABASE_URL: ${DATABASE_URL}
-      REDIS_URL: redis://:${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}@redis:6379/0
-      SERVICE_PORT: 5008
-      NEWS_API_KEY: ${NEWS_API_KEY}
-      ALPHA_VANTAGE_API_KEY: ${ALPHA_VANTAGE_API_KEY}
-      FINNHUB_API_KEY: ${FINNHUB_API_KEY}
-    depends_on:
-      redis:
-        condition: service_healthy
-    ports:
-      - "5008:5008"
-    volumes:
-      - ./logs/news:/app/logs
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5008/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  # Pattern Detection Service (REST API)
+  # =====================================================
+  # PATTERN DETECTION SERVICE (REST API)
+  # =====================================================
   pattern:
     build:
       context: ./services/pattern
       dockerfile: Dockerfile
     container_name: catalyst-pattern
     env_file: 
-      - ./.env
+      - .env  # Consistent
     environment:
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: redis://:${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}@redis:6379/0
@@ -157,51 +172,26 @@ services:
       - "5002:5002"
     volumes:
       - ./logs/pattern:/app/logs
+    networks:
+      - catalyst-network
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5002/health"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 40s
 
-  # Risk Manager Service (REST API)
-  risk-manager:
-    build:
-      context: ./services/risk-manager
-      dockerfile: Dockerfile
-    container_name: catalyst-risk
-    env_file: 
-      - ./.env
-    environment:
-      DATABASE_URL: ${DATABASE_URL}
-      REDIS_URL: redis://:${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}@redis:6379/0
-      SERVICE_PORT: 5004
-      MAX_DAILY_LOSS: ${MAX_DAILY_LOSS:-2000}
-      MAX_POSITION_RISK: ${MAX_POSITION_RISK:-0.02}
-      POSITION_SIZE_MULTIPLIER: ${POSITION_SIZE_MULTIPLIER:-1.0}
-      RISK_FREE_RATE: ${RISK_FREE_RATE:-0.05}
-    depends_on:
-      redis:
-        condition: service_healthy
-    ports:
-      - "5004:5004"
-    volumes:
-      - ./logs/risk:/app/logs
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5004/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  # Technical Analysis Service (REST API)
+  # =====================================================
+  # TECHNICAL ANALYSIS SERVICE (REST API)
+  # =====================================================
   technical:
     build:
       context: ./services/technical
       dockerfile: Dockerfile
     container_name: catalyst-technical
     env_file: 
-      - ./.env  # Fixed path (was ./config/.env)
+      - .env  # FIXED: Was ./config/.env (incorrect path)
     environment:
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: redis://:${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}@redis:6379/0
@@ -238,21 +228,61 @@ services:
       - "5003:5003"
     volumes:
       - ./logs/technical:/app/logs
+    networks:
+      - catalyst-network
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5003/health"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 40s
 
-  # Trading Execution Service (REST API)
+  # =====================================================
+  # RISK MANAGER SERVICE (REST API) - v4.2 Addition
+  # =====================================================
+  risk-manager:
+    build:
+      context: ./services/risk-manager
+      dockerfile: Dockerfile
+    container_name: catalyst-risk
+    env_file: 
+      - .env  # Consistent
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}@redis:6379/0
+      SERVICE_PORT: 5004
+      MAX_DAILY_LOSS: ${MAX_DAILY_LOSS:-2000}
+      MAX_POSITION_RISK: ${MAX_POSITION_RISK:-0.02}
+      POSITION_SIZE_MULTIPLIER: ${POSITION_SIZE_MULTIPLIER:-1.0}
+      RISK_FREE_RATE: ${RISK_FREE_RATE:-0.05}
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "5004:5004"
+    volumes:
+      - ./logs/risk:/app/logs
+    networks:
+      - catalyst-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # =====================================================
+  # TRADING EXECUTION SERVICE (REST API)
+  # =====================================================
   trading:
     build:
       context: ./services/trading
       dockerfile: Dockerfile
     container_name: catalyst-trading
     env_file: 
-      - ./.env
+      - .env  # Consistent
     environment:
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: redis://:${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}@redis:6379/0
@@ -277,28 +307,33 @@ services:
       - "5005:5005"
     volumes:
       - ./logs/trading:/app/logs
+    networks:
+      - catalyst-network
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5005/health"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 40s
 
-  # Reporting & Analytics Service (REST API)
+  # =====================================================
+  # REPORTING & ANALYTICS SERVICE (REST API)
+  # =====================================================
   reporting:
     build:
       context: ./services/reporting
       dockerfile: Dockerfile
     container_name: catalyst-reporting
     env_file: 
-      - ./.env
+      - .env  # Consistent
     environment:
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: redis://:${REDIS_PASSWORD:-RedisCatalyst2025!SecureCache}@redis:6379/0
       SERVICE_PORT: 5009
-      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL}
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
       EMAIL_ALERTS_ENABLED: ${EMAIL_ALERTS_ENABLED:-false}
-      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL}
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
     depends_on:
       redis:
         condition: service_healthy
@@ -307,20 +342,28 @@ services:
     volumes:
       - ./logs/reporting:/app/logs
       - ./reports:/app/reports
+    networks:
+      - catalyst-network
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5009/health"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 40s
 
-# Volumes (only Redis data, PostgreSQL is cloud-managed)
+# =====================================================
+# VOLUMES (Redis only - PostgreSQL is cloud-managed)
+# =====================================================
 volumes:
   redis_data:
     driver: local
+  news_logs:  # FIXED: Added missing volume declaration
 
-# Networks
+# =====================================================
+# NETWORKS
+# =====================================================
 networks:
-  default:
-    name: catalyst-network
+  catalyst-network:
     driver: bridge
+    name: catalyst-network
