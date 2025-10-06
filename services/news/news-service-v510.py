@@ -2,17 +2,12 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: news-service.py
-Version: 5.2.0
+Version: 5.1.0
 Last Updated: 2025-10-06
 Purpose: News catalyst detection with normalized schema v5.0
 
 REVISION HISTORY
-v5.2.0 2025-10-06) 
-- Description:
-- Replace the update_source_reliability() function in services/news/news-service.py
-- Now that catalyst_strength is DECIMAL, no CAST needed
 
-REVISION HISTORY:
 v5.1.0 (2025-10-06) - Normalized Schema Migration
 - Migrated to news_sentiment table with security_id FK
 - Added time_dimension integration with time_id FK
@@ -419,16 +414,14 @@ async def update_source_reliability():
         try:
             await asyncio.sleep(3600)  # Run hourly
             
-            # FIXED: No CAST needed - catalyst_strength is now DECIMAL(4,3)
+            # Get news with both catalyst prediction and actual impact
             sources = await state.db_pool.fetch("""
                 SELECT 
                     source,
                     COUNT(*) as total_articles,
                     AVG(CASE 
-                        WHEN (catalyst_strength >= 0.5 
-                              AND ABS(price_impact_15min) >= 1.0)
-                        OR (catalyst_strength < 0.5 
-                            AND ABS(price_impact_15min) < 1.0)
+                        WHEN (catalyst_strength >= 0.5 AND ABS(price_impact_15min) >= 1.0)
+                        OR (catalyst_strength < 0.5 AND ABS(price_impact_15min) < 1.0)
                         THEN 1.0 ELSE 0.0 
                     END) as accuracy
                 FROM news_sentiment
@@ -452,8 +445,6 @@ async def update_source_reliability():
             
         except Exception as e:
             logger.error(f"Source reliability update error: {e}", exc_info=True)
-            await asyncio.sleep(60)  # Retry in 1 minute on error
-
 
 # === NEWS FETCHING ===
 async def fetch_newsapi(symbol: str, hours: int) -> List[Dict]:
