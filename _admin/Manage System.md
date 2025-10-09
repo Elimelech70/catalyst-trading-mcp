@@ -28,8 +28,6 @@ root       73360  0.0  0.0   7016  2272 pts/0    S+   06:10   0:00 grep --color=
 # ----------------------------------------------
 Puts logs in combined.log
 
-# Live logs (follow mode)
-docker logs catalyst-orchestration --tail 20
 
 # ----------------------------------------------
 ## starting service after py file updates
@@ -52,6 +50,10 @@ docker-compose ps scanner
 ### View logs to confirm successful restart
 docker-compose logs -f scanner
 
+# Live logs (follow mode)
+docker logs catalyst-orchestration --tail 20
+
+docker logs catalyst-news --tail 20
 
 
 #----------------------------------------------------------
