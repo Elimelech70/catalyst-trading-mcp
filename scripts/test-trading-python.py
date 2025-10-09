@@ -2,11 +2,15 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: test_trading_service.py
-Version: 1.0.0
+Version: 1.0.1
 Last Updated: 2025-10-07
 Purpose: Advanced test suite for Trading Service v5.0.0
 
 REVISION HISTORY:
+v1.0.1 (2025-10-07) - Fixed database connection
+  - Use environment DATABASE_URL properly
+  - Added connection string validation
+  - Better error handling for remote DB
 v1.0.0 (2025-10-07) - Comprehensive Python test suite
   - Async tests for all endpoints
   - Data validation tests
@@ -27,12 +31,30 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import os
 from decimal import Decimal
+import sys
 
 # Configuration
 TRADING_URL = "http://localhost:5002"
 SCANNER_URL = "http://localhost:5001"
 NEWS_URL = "http://localhost:5008"
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://catalyst:catalyst@localhost:5432/catalyst_trading")
+
+# Get DATABASE_URL from environment - this should be your DigitalOcean database
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+# Check if DATABASE_URL is set
+if not DATABASE_URL:
+    print("❌ ERROR: DATABASE_URL environment variable not set!")
+    print("Please export your DigitalOcean database URL:")
+    print('export DATABASE_URL="postgresql://user:password@host:port/database?sslmode=require"')
+    sys.exit(1)
+
+# Validate DATABASE_URL format
+if "localhost" in DATABASE_URL or "127.0.0.1" in DATABASE_URL:
+    print("⚠️ WARNING: DATABASE_URL points to localhost, but database is on DigitalOcean")
+    print("Current DATABASE_URL:", DATABASE_URL[:30] + "...")
+    print("Make sure to use your DigitalOcean database connection string")
+
+print(f"📊 Using database: {DATABASE_URL.split('@')[1].split('/')[0] if '@' in DATABASE_URL else 'unknown'}")
 
 class TradingServiceTester:
     def __init__(self):
@@ -45,7 +67,21 @@ class TradingServiceTester:
     async def setup(self):
         """Initialize connections"""
         self.session = aiohttp.ClientSession()
-        self.db_conn = await asyncpg.connect(DATABASE_URL)
+        
+        # Connect to database with better error handling
+        try:
+            print(f"Connecting to database...")
+            self.db_conn = await asyncpg.connect(DATABASE_URL)
+            print("✅ Database connection established")
+        except Exception as e:
+            print(f"❌ Failed to connect to database: {e}")
+            print("\nTroubleshooting:")
+            print("1. Make sure DATABASE_URL is exported:")
+            print('   export DATABASE_URL="your-digitalocean-connection-string"')
+            print("2. Verify the database is accessible from this server")
+            print("3. Check if SSL is required (add ?sslmode=require to connection string)")
+            raise
+            
         print("✅ Test environment initialized")
         
     async def cleanup(self):
