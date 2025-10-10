@@ -75,9 +75,13 @@ WHERE s.symbol = $1
 
 ### 1.1 Fundamental Truths
 
-**Truth #1: Lazy Error Handling Steals From Us**
+**Truth #1.1: Lazy Error Handling Steals From Us**
 - Silent failures make debugging impossible
 - Quick fixes create technical debt that compounds
+
+**Truth #1.2: Don't make changes unless conforms to design documents in git
+
+**Truth #1.3: If new idea that does not conform design documents, add to Business Improvement document.
 
 **Truth #2: This System Handles Real Money**
 - Every hidden error is potential financial loss
