@@ -1,12 +1,19 @@
 # Name of Application: Catalyst Trading System
 # Name of file: docker-compose.yml
-# Version: 1.0.5
-# Last Updated: 2025-10-11
-# Purpose: Complete docker-compose with all services
+# Version: 1.0.4
+# Last Updated: 2025-10-07
+# Purpose: Complete docker-compose with News, Scanner, and Trading services
 
 # REVISION HISTORY:
-# v1.0.5 (2025-10-11) - Fixed Pattern Service syntax
 # v1.0.4 (2025-10-07) - Added Trading Service with proper configuration
+#                     - Added health checks for all services
+#                     - Added proper dependencies and volumes
+# v1.0.3 (2025-10-06) - Added healthcheck override in docker-compose
+#                     - Increased start_period to 60s for database initialization
+
+# Description:
+# Complete docker-compose configuration for running News, Scanner, and Trading services
+# with normalized schema v5.0 support
 
 version: '3.8'
 
@@ -122,7 +129,7 @@ services:
       start_period: 45s
       retries: 3
 
-  # Technical Service - v5.0.0 with normalized schema
+# Technical Service - v5.0.0 with normalized schema
   technical:
     build:
       context: ./services/technical
@@ -149,31 +156,31 @@ services:
       start_period: 45s
       retries: 3
 
-  # Pattern Service - v5.0.0
+  Pattern Service - v5.0.0 (Uncomment when ready to deploy)
   pattern:
     build:
-      context: ./services/pattern
-      dockerfile: Dockerfile
-    container_name: catalyst-pattern
-    environment:
-      DATABASE_URL: ${DATABASE_URL}
-      SERVICE_PORT: 5004
-    ports:
-      - "5004:5004"
-    volumes:
-      - pattern_logs:/app/logs
-    networks:
-      - catalyst-network
-    depends_on:
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "python", "-c", "import requests; r = requests.get('http://localhost:5004/health', timeout=5); exit(0 if r.status_code == 200 else 1)"]
-      interval: 30s
-      timeout: 10s
-      start_period: 30s
-      retries: 3
+     context: ./services/pattern
+     dockerfile: Dockerfile
+     container_name: catalyst-pattern
+     environment:
+       DATABASE_URL: ${DATABASE_URL}
+       SERVICE_PORT: 5004
+     ports:
+       - "5004:5004"
+     volumes:
+       - pattern_logs:/app/logs
+     networks:
+       - catalyst-network
+     depends_on:
+       redis:
+         condition: service_healthy
+     restart: unless-stopped
+     healthcheck:
+       test: ["CMD", "python", "-c", "import requests; r = requests.get('http://localhost:5004/health', timeout=5); exit(0 if r.status_code == 200 else 1)"]
+       interval: 30s
+       timeout: 10s
+       start_period: 30s
+       retries: 3
 
   # Risk Manager - v5.0.0 (Uncomment when migrated)
   # risk:
@@ -278,3 +285,7 @@ volumes:
 networks:
   catalyst-network:
     driver: bridge
+
+
+
+  
