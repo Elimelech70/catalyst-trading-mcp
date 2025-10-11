@@ -42,6 +42,7 @@ import asyncpg
 import os
 import logging
 import numpy as np
+import json
 
 # ============================================================================
 # LOGGING SETUP
@@ -571,7 +572,7 @@ async def detect_patterns(
                     pattern.get('breakout_level'),
                     pattern.get('target_price'),
                     pattern.get('stop_level'),
-                    {}  # metadata
+                    json.dumps({})  # metadata as JSON string
                 )
                 
                 detected_patterns.append({
