@@ -284,3 +284,30 @@ volumes:
 networks:
   catalyst-network:
     driver: bridge
+
+# Technical Service - v5.0.0 with normalized schema
+  technical:
+    build:
+      context: ./services/technical
+      dockerfile: Dockerfile
+    container_name: catalyst-technical
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      SERVICE_PORT: 5003
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "5003:5003"
+    volumes:
+      - technical_logs:/app/logs
+    networks:
+      - catalyst-network
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; r = requests.get('http://localhost:5003/health', timeout=5); exit(0 if r.status_code == 200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 45s
+      retries: 3
