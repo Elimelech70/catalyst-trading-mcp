@@ -121,11 +121,11 @@ async def fetch_and_store_bars(symbol: str, timeframe: str = "5Min", days: int =
                 "SELECT get_or_create_time($1)", timestamp
             )
             
-            # Insert bar with FKs
+            # Insert bar with FKs (use correct column names: open, high, low, close)
             result = await conn.execute("""
                 INSERT INTO trading_history (
                     security_id, time_id, timeframe,
-                    open_price, high_price, low_price, close_price,
+                    open, high, low, close,
                     volume, vwap, trade_count
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 ON CONFLICT (security_id, time_id, timeframe) DO NOTHING
