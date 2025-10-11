@@ -2,16 +2,11 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: pattern-service.py
-Version: 5.0.2
+Version: 5.0.1
 Last Updated: 2025-10-11
 Purpose: Pattern detection with normalized schema v5.0 (security_id + time_id FKs)
 
 REVISION HISTORY:
-v5.0.2 (2025-10-11) - Database Column Names Fix
-- ✅ CRITICAL FIX: Use correct column names (open, high, low, close) not (*_price)
-- ✅ Matches database-schema-mcp-v50.md specification
-- ✅ Now properly fetches price data from trading_history table
-
 v5.0.1 (2025-10-11) - Port Configuration & Pydantic v2 Fix
 - ✅ Fixed: Read SERVICE_PORT from environment (was hardcoded to 5002)
 - ✅ Fixed: Migrated to Pydantic v2 field_validator (no more warnings)
@@ -21,6 +16,10 @@ v5.0.0 (2025-10-06) - Normalized Schema Update
 - ✅ Stores in pattern_analysis table with security_id + time_id FKs
 - ✅ Pattern detection uses FKs (NO symbol VARCHAR!)
 - ✅ Queries use JOINs to get symbol/company_name
+- ✅ Enhanced pattern types (breakouts, reversals, consolidations)
+- ✅ Confidence scoring for ML training
+- ✅ Helper functions: get_security_id(), get_time_id()
+- ✅ Error handling compliant with v1.0 standard
 
 Description of Service:
 Detects chart patterns using normalized v5.0 schema:
@@ -60,9 +59,9 @@ logger = logging.getLogger(__name__)
 class Config:
     """Service configuration"""
     SERVICE_NAME = "pattern-service"
-    VERSION = "5.0.2"
+    VERSION = "5.0.1"
     
-    # Read port from environment variable
+    # ✅ FIX: Read port from environment variable
     PORT = int(os.getenv("SERVICE_PORT", "5004"))
     
     DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://catalyst:catalyst@localhost:5432/catalyst_trading")
@@ -205,6 +204,7 @@ class PatternRequest(BaseModel):
     symbol: str = Field(..., description="Stock symbol (e.g., AAPL)")
     timeframe: str = Field(default="5min", description="Timeframe (1min, 5min, 15min, 1h, 1d)")
     
+    # ✅ FIX: Pydantic v2 field_validator
     @field_validator('symbol')
     @classmethod
     def validate_symbol(cls, v):
@@ -281,19 +281,15 @@ async def fetch_price_history(
     """
     Fetch price history using JOINs (v5.0 pattern).
     
-    CRITICAL v5.0.2 FIX: Uses correct column names from database schema:
-    - th.close (NOT th.close_price)
-    - th.high (NOT th.high_price)
-    - th.low (NOT th.low_price)
-    - th.open (NOT th.open_price)
+    CRITICAL: Uses security_id FK and JOINs to get symbol!
     """
     try:
         rows = await conn.fetch("""
             SELECT 
-                th.close,
-                th.high,
-                th.low,
-                th.open,
+                th.close_price,
+                th.high_price,
+                th.low_price,
+                th.open_price,
                 th.volume,
                 td.timestamp
             FROM trading_history th
@@ -526,12 +522,12 @@ async def detect_patterns(
                 detail=f"Insufficient price data for {request.symbol} ({len(history)} bars)"
             )
         
-        # Step 3: Extract price arrays (v5.0.2 FIX: use correct column names)
-        closes = [float(h['close']) for h in history]
-        highs = [float(h['high']) for h in history]
-        lows = [float(h['low']) for h in history]
+        # Extract price arrays
+        closes = [float(h['close_price']) for h in history]
+        highs = [float(h['high_price']) for h in history]
+        lows = [float(h['low_price']) for h in history]
         
-        # Step 4: Run pattern detection
+        # Step 3: Run pattern detection
         detected_patterns = []
         
         # Try each pattern type
@@ -545,7 +541,7 @@ async def detect_patterns(
         time_id = await get_time_id(conn, datetime.utcnow())
         current_price = closes[-1]
         
-        # Step 5: Store each detected pattern with FKs
+        # Step 4: Store each detected pattern with FKs
         for pattern in patterns_to_check:
             if pattern and pattern['confidence'] >= Config.MIN_CONFIDENCE:
                 # Insert into pattern_analysis table
@@ -680,6 +676,6 @@ if __name__ == "__main__":
     uvicorn.run(
         "pattern-service:app",
         host="0.0.0.0",
-        port=Config.PORT,
+        port=Config.PORT,  # ✅ FIX: Use Config.PORT instead of hardcoded value
         reload=False
     )
