@@ -1,43 +1,43 @@
 # Name of Application: Catalyst Trading System
-# Name of file: services/technical/Dockerfile
-# Version: 4.1.1
-# Last Updated: 2025-09-20
-# Purpose: Docker container for Technical Service - Fixed for single-file implementation
+# Service: Technical Service
+# Version: 5.0.0
 
-FROM python:3.10-slim
+FROM python:3.11-slim
 
 WORKDIR /app
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     gcc \
-    g++ \
-    gfortran \
-    libopenblas-dev \
-    liblapack-dev \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first for better caching
-COPY requirements.txt .
+# Create non-root user
+RUN groupadd -r catalyst && useradd -r -g catalyst catalyst
 
-# Install Python dependencies
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+# Copy requirements
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy service code (single file implementation)
-COPY *.py ./
+# Copy application
+COPY technical-service.py .
 
-# Create placeholder directories that the service might expect
-RUN mkdir -p indicators models logs
+# Create logs directory
+RUN mkdir -p /app/logs && chown -R catalyst:catalyst /app
 
-# Set environment variables
-ENV PYTHONUNBUFFERED=1
-ENV MCP_MODE=production
+# Switch to non-root user
+USER catalyst
+
+# Environment variables
 ENV SERVICE_PORT=5003
+ENV PYTHONUNBUFFERED=1
+
+# Expose port
+EXPOSE 5003
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import requests; requests.get('http://localhost:5003/health')" || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:5003/health || exit 1
 
 # Run the service
-CMD ["python", "-u", "technical-service.py"]
+CMD ["python", "technical-service.py"]
