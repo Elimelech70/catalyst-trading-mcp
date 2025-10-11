@@ -26,7 +26,9 @@ load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
-ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://data.alpaca.markets")
+# ✅ Force data API endpoint (not trading endpoint!)
+ALPACA_DATA_URL = "https://data.alpaca.markets"
+ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")  # For trading
 
 # Validate required environment variables
 if not DATABASE_URL:
@@ -38,7 +40,8 @@ if not ALPACA_SECRET_KEY:
 
 print(f"✅ Loaded environment variables")
 print(f"   Database: {DATABASE_URL.split('@')[1].split('/')[0]}...")  # Show host only
-print(f"   Alpaca URL: {ALPACA_BASE_URL}")
+print(f"   Alpaca Data API: {ALPACA_DATA_URL}")  # Market data endpoint
+print(f"   Alpaca Trading API: {ALPACA_BASE_URL}")  # Trading endpoint
 
 async def fetch_and_store_bars(symbol: str, timeframe: str = "5Min", days: int = 5):
     """
@@ -68,8 +71,8 @@ async def fetch_and_store_bars(symbol: str, timeframe: str = "5Min", days: int =
         end = datetime.now()
         start = end - timedelta(days=days)
         
-        # Alpaca v2 bars endpoint
-        url = f"{ALPACA_BASE_URL}/v2/stocks/{symbol}/bars"
+        # Alpaca v2 bars endpoint (use data API, not trading API!)
+        url = f"{ALPACA_DATA_URL}/v2/stocks/{symbol}/bars"
         params = {
             "timeframe": timeframe,
             "start": start.isoformat() + "Z",
