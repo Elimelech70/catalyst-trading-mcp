@@ -2,16 +2,11 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: pattern-service.py
-Version: 5.0.1
-Last Updated: 2025-10-11
+Version: 5.0.0
+Last Updated: 2025-10-06
 Purpose: Pattern detection with normalized schema v5.0 (security_id + time_id FKs)
 
 REVISION HISTORY:
-v5.0.1 (2025-10-11) - Port Configuration & Pydantic v2 Fix
-- ✅ Fixed: Read SERVICE_PORT from environment (was hardcoded to 5002)
-- ✅ Fixed: Migrated to Pydantic v2 field_validator (no more warnings)
-- ✅ Compatible with docker-compose.yml port mapping
-
 v5.0.0 (2025-10-06) - Normalized Schema Update
 - ✅ Stores in pattern_analysis table with security_id + time_id FKs
 - ✅ Pattern detection uses FKs (NO symbol VARCHAR!)
@@ -20,6 +15,10 @@ v5.0.0 (2025-10-06) - Normalized Schema Update
 - ✅ Confidence scoring for ML training
 - ✅ Helper functions: get_security_id(), get_time_id()
 - ✅ Error handling compliant with v1.0 standard
+
+v4.0.0 (2025-09-15) - DEPRECATED (Denormalized)
+- Used symbol VARCHAR in queries
+- No FK relationships
 
 Description of Service:
 Detects chart patterns using normalized v5.0 schema:
@@ -32,7 +31,7 @@ Detects chart patterns using normalized v5.0 schema:
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
@@ -59,11 +58,8 @@ logger = logging.getLogger(__name__)
 class Config:
     """Service configuration"""
     SERVICE_NAME = "pattern-service"
-    VERSION = "5.0.1"
-    
-    # ✅ FIX: Read port from environment variable
-    PORT = int(os.getenv("SERVICE_PORT", "5004"))
-    
+    VERSION = "5.0.0"
+    PORT = 5002
     DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://catalyst:catalyst@localhost:5432/catalyst_trading")
     POOL_MIN_SIZE = 2
     POOL_MAX_SIZE = 10
@@ -124,7 +120,7 @@ state = ServiceState()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown"""
-    logger.info(f"Starting {Config.SERVICE_NAME} v{Config.VERSION} on port {Config.PORT}")
+    logger.info(f"Starting {Config.SERVICE_NAME} v{Config.VERSION}")
     
     try:
         # Initialize database pool
@@ -196,7 +192,7 @@ async def get_db():
         yield conn
 
 # ============================================================================
-# MODELS (Pydantic v2 Compatible)
+# MODELS
 # ============================================================================
 
 class PatternRequest(BaseModel):
@@ -204,14 +200,11 @@ class PatternRequest(BaseModel):
     symbol: str = Field(..., description="Stock symbol (e.g., AAPL)")
     timeframe: str = Field(default="5min", description="Timeframe (1min, 5min, 15min, 1h, 1d)")
     
-    # ✅ FIX: Pydantic v2 field_validator
-    @field_validator('symbol')
-    @classmethod
+    @validator('symbol')
     def validate_symbol(cls, v):
         return v.upper().strip()
     
-    @field_validator('timeframe')
-    @classmethod
+    @validator('timeframe')
     def validate_timeframe(cls, v):
         valid = ['1min', '5min', '15min', '30min', '1h', '4h', '1d']
         if v not in valid:
@@ -230,9 +223,9 @@ class PatternResult(BaseModel):
     timeframe: str
     confidence_score: float
     price_at_detection: float
-    breakout_level: Optional[float] = None
-    target_price: Optional[float] = None
-    stop_level: Optional[float] = None
+    breakout_level: Optional[float]
+    target_price: Optional[float]
+    stop_level: Optional[float]
 
 # ============================================================================
 # HELPER FUNCTIONS (NORMALIZED SCHEMA)
@@ -347,8 +340,8 @@ def detect_ascending_triangle(highs: List[float], lows: List[float], closes: Lis
             'pattern_subtype': PatternSubtype.ASCENDING_TRIANGLE,
             'confidence': confidence,
             'breakout_level': resistance,
-            'target_price': resistance * 1.05,
-            'stop_level': avg_recent_low * 0.98
+            'target_price': resistance * 1.05,  # 5% target
+            'stop_level': avg_recent_low * 0.98  # 2% below support
         }
     
     return None
@@ -382,7 +375,7 @@ def detect_bull_flag(highs: List[float], lows: List[float], closes: List[float])
     
     # Pattern criteria
     tight_flag = flag_range < 0.05  # < 5% range
-    slight_pullback = 0 < downward_drift < 0.03
+    slight_pullback = 0 < downward_drift < 0.03  # Small pullback
     
     if tight_flag and slight_pullback:
         confidence = 0.70
@@ -392,7 +385,7 @@ def detect_bull_flag(highs: List[float], lows: List[float], closes: List[float])
             'pattern_subtype': PatternSubtype.BULL_FLAG,
             'confidence': confidence,
             'breakout_level': max(flag_highs),
-            'target_price': closes[-1] * (1 + pole_gain),
+            'target_price': closes[-1] * (1 + pole_gain),  # Same move as pole
             'stop_level': min(flag_lows) * 0.98
         }
     
@@ -403,80 +396,93 @@ def detect_double_bottom(lows: List[float], closes: List[float]) -> Optional[Dic
     Detect Double Bottom pattern (reversal).
     
     Characteristics:
-    - Two distinct lows at similar price levels
-    - Peak between the lows
-    - Bullish reversal pattern
+    - Two distinct lows at similar prices
+    - Peak in between
+    - Reversal pattern
     """
-    if len(lows) < 40:
+    if len(lows) < 50:
         return None
     
-    # Find local minima
-    min_indices = []
-    for i in range(5, len(lows) - 5):
-        if lows[i] == min(lows[i-5:i+5]):
-            min_indices.append(i)
+    # Find two lowest points
+    lows_arr = np.array(lows[-50:])
+    sorted_indices = np.argsort(lows_arr)
     
-    if len(min_indices) < 2:
+    # Get two lowest lows that are far apart
+    low1_idx = sorted_indices[0]
+    low2_idx = None
+    
+    for idx in sorted_indices[1:10]:
+        if abs(idx - low1_idx) > 10:  # At least 10 bars apart
+            low2_idx = idx
+            break
+    
+    if low2_idx is None:
         return None
     
-    # Check last two minima
-    first_low_idx = min_indices[-2]
-    second_low_idx = min_indices[-1]
+    low1_price = lows_arr[low1_idx]
+    low2_price = lows_arr[low2_idx]
     
-    first_low = lows[first_low_idx]
-    second_low = lows[second_low_idx]
+    # Check if lows are similar
+    price_diff = abs(low1_price - low2_price) / low1_price
     
-    # Pattern criteria: lows within 2% of each other
-    similarity = abs(first_low - second_low) / first_low
-    
-    if similarity < 0.02:
-        # Find peak between lows
-        peak = max(closes[first_low_idx:second_low_idx])
-        support = (first_low + second_low) / 2
+    if price_diff < 0.03:  # Within 3%
+        # Check for peak in between
+        start_idx = min(low1_idx, low2_idx)
+        end_idx = max(low1_idx, low2_idx)
+        peak = max(lows_arr[start_idx:end_idx])
         
-        confidence = 0.65
+        peak_height = (peak - low1_price) / low1_price
         
-        return {
-            'pattern_type': PatternType.REVERSAL,
-            'pattern_subtype': PatternSubtype.DOUBLE_BOTTOM,
-            'confidence': confidence,
-            'breakout_level': peak,
-            'target_price': peak * 1.05,
-            'stop_level': support * 0.97
-        }
+        if peak_height > 0.05:  # At least 5% peak
+            confidence = 0.75
+            
+            return {
+                'pattern_type': PatternType.REVERSAL,
+                'pattern_subtype': PatternSubtype.DOUBLE_BOTTOM,
+                'confidence': confidence,
+                'breakout_level': peak,
+                'target_price': peak * 1.05,
+                'stop_level': min(low1_price, low2_price) * 0.97
+            }
     
     return None
 
 def detect_consolidation(highs: List[float], lows: List[float], closes: List[float]) -> Optional[Dict]:
     """
-    Detect Consolidation/Range pattern.
+    Detect consolidation/range-bound pattern.
     
     Characteristics:
     - Price trading in tight range
     - Low volatility
     - Potential breakout setup
     """
-    if len(closes) < 20:
+    if len(closes) < 30:
         return None
     
-    recent_prices = closes[-20:]
-    price_range = (max(recent_prices) - min(recent_prices)) / np.mean(recent_prices)
+    recent_highs = highs[-30:]
+    recent_lows = lows[-30:]
+    recent_closes = closes[-30:]
     
-    # Tight range: < 3% movement
-    if price_range < 0.03:
-        resistance = max(recent_prices)
-        support = min(recent_prices)
+    range_high = max(recent_highs)
+    range_low = min(recent_lows)
+    range_size = (range_high - range_low) / closes[-1]
+    
+    # Check if trading in tight range
+    if range_size < 0.05:  # < 5% range
+        # Check for low volatility
+        volatility = np.std(recent_closes) / np.mean(recent_closes)
         
-        confidence = 0.60
-        
-        return {
-            'pattern_type': PatternType.CONSOLIDATION,
-            'pattern_subtype': PatternSubtype.RANGE_BOUND,
-            'confidence': confidence,
-            'breakout_level': resistance,
-            'target_price': resistance * 1.03,
-            'stop_level': support * 0.98
-        }
+        if volatility < 0.02:  # Low volatility
+            confidence = 0.65
+            
+            return {
+                'pattern_type': PatternType.CONSOLIDATION,
+                'pattern_subtype': PatternSubtype.RANGE_BOUND,
+                'confidence': confidence,
+                'breakout_level': range_high,
+                'target_price': range_high * 1.03,
+                'stop_level': range_low * 0.98
+            }
     
     return None
 
@@ -484,24 +490,13 @@ def detect_consolidation(highs: List[float], lows: List[float], closes: List[flo
 # API ENDPOINTS
 # ============================================================================
 
-@app.get("/health")
-async def health_check():
-    """Health check endpoint"""
-    return {
-        "status": "healthy" if state.is_healthy else "unhealthy",
-        "service": "pattern",
-        "version": Config.VERSION,
-        "database": "connected" if state.db_pool else "disconnected",
-        "schema": "v5.0 normalized"
-    }
-
-@app.post("/api/v1/patterns/detect", response_model=List[PatternResult])
+@app.post("/api/v1/detect", response_model=List[PatternResult])
 async def detect_patterns(
     request: PatternRequest,
     conn: asyncpg.Connection = Depends(get_db)
 ):
     """
-    Detect chart patterns for a symbol.
+    Detect chart patterns and store with security_id FK.
     
     v5.0 Pattern:
     1. Get security_id (NOT symbol!)
@@ -667,6 +662,74 @@ async def get_patterns(
         logger.error(f"Error fetching patterns: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/v1/patterns/high-confidence")
+async def get_high_confidence_patterns(
+    min_confidence: float = 0.75,
+    hours: int = 24,
+    conn: asyncpg.Connection = Depends(get_db)
+):
+    """Get all high-confidence patterns across all securities"""
+    try:
+        results = await conn.fetch("""
+            SELECT 
+                pa.pattern_id,
+                s.symbol,
+                s.company_name,
+                td.timestamp as detected_at,
+                pa.pattern_type,
+                pa.pattern_subtype,
+                pa.confidence_score,
+                pa.price_at_detection,
+                pa.breakout_level,
+                pa.target_price
+            FROM pattern_analysis pa
+            JOIN securities s ON s.security_id = pa.security_id
+            JOIN time_dimension td ON td.time_id = pa.time_id
+            WHERE pa.confidence_score >= $1
+            AND td.timestamp >= NOW() - INTERVAL '1 hour' * $2
+            ORDER BY pa.confidence_score DESC, td.timestamp DESC
+        """, min_confidence, hours)
+        
+        return {
+            "min_confidence": min_confidence,
+            "hours": hours,
+            "count": len(results),
+            "patterns": [dict(r) for r in results]
+        }
+    
+    except Exception as e:
+        logger.error(f"Error fetching high-confidence patterns: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    if not state.is_healthy or not state.db_pool:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unhealthy",
+                "service": Config.SERVICE_NAME,
+                "version": Config.VERSION
+            }
+        )
+    
+    return {
+        "status": "healthy",
+        "service": Config.SERVICE_NAME,
+        "version": Config.VERSION,
+        "schema": "v5.0 normalized",
+        "uses_security_id_fk": True,
+        "uses_time_id_fk": True,
+        "pattern_types": [
+            "Breakout (ascending triangle, bull flag)",
+            "Reversal (double bottom, head & shoulders)",
+            "Consolidation (range-bound, wedge)",
+            "Continuation (bull/bear continuation)"
+        ],
+        "min_confidence": Config.MIN_CONFIDENCE
+    }
+
 # ============================================================================
 # MAIN
 # ============================================================================
@@ -674,8 +737,8 @@ async def get_patterns(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
-        "pattern-service:app",
+        app,
         host="0.0.0.0",
-        port=Config.PORT,  # ✅ FIX: Use Config.PORT instead of hardcoded value
-        reload=False
+        port=Config.PORT,
+        log_level="info"
     )
