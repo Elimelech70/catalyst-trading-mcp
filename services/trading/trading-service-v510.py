@@ -2,16 +2,11 @@
 
 # Name of Application: Catalyst Trading System
 # Name of file: trading-service.py
-# Version: 5.1.1
+# Version: 5.1.0
 # Last Updated: 2025-10-13
 # Purpose: Trading service with RIGOROUS error handling (Playbook v3.0 Compliant)
 
 # REVISION HISTORY:
-# v5.1.1 (2025-10-13) - FastAPI Lifespan Migration
-# - Migrated from deprecated @app.on_event to lifespan context manager
-# - Eliminates FastAPI deprecation warnings
-# - Future-proof for FastAPI updates
-#
 # v5.1.0 (2025-10-13) - RIGOROUS ERROR HANDLING (Playbook v3.0 Compliant)
 # - Fixed #1: get_security_id() - Specific exception handling (NO generic Exception)
 # - Fixed #2: create_cycle() - Database vs validation errors distinguished
@@ -42,7 +37,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Dict, List, Optional
 from datetime import datetime
-from contextlib import asynccontextmanager  # âœ… For lifespan
 import asyncpg
 import json
 import os
@@ -55,97 +49,16 @@ from decimal import Decimal
 # SERVICE METADATA
 # ============================================================================
 SERVICE_NAME = "trading"
-SERVICE_VERSION = "5.1.1"  # âœ… Updated: FastAPI lifespan migration
+SERVICE_VERSION = "5.1.0"
 SERVICE_TITLE = "Trading Service"
 SCHEMA_VERSION = "v5.0 normalized"
 SERVICE_PORT = 5005
 
-from contextlib import asynccontextmanager
-
-# ============================================================================
-# LIFESPAN MANAGEMENT
-# ============================================================================
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """
-    FastAPI lifespan context manager for startup/shutdown.
-    Replaces deprecated @app.on_event decorators.
-    """
-    # STARTUP
-    logger.info(f"Starting {SERVICE_TITLE} v{SERVICE_VERSION}")
-    
-    try:
-        DATABASE_URL = os.getenv("DATABASE_URL")
-        if not DATABASE_URL:
-            raise ValueError("DATABASE_URL environment variable not configured")
-        
-        state.db_pool = await asyncpg.create_pool(
-            DATABASE_URL,
-            min_size=5,
-            max_size=20,
-            command_timeout=60
-        )
-        
-        logger.info("Database pool initialized")
-        
-        # Verify schema
-        await verify_schema()
-        
-        logger.info(f"{SERVICE_TITLE} v{SERVICE_VERSION} ready on port {SERVICE_PORT}")
-        
-    except ValueError as e:
-        logger.critical(f"Configuration error: {e}", exc_info=True)
-        raise
-        
-    except asyncpg.PostgresError as e:
-        logger.critical(f"Database initialization failed: {e}", exc_info=True)
-        raise
-        
-    except Exception as e:
-        logger.critical(f"Unexpected startup error: {e}", exc_info=True)
-        raise
-    
-    # YIELD CONTROL TO APPLICATION
-    yield
-    
-    # SHUTDOWN
-    logger.info(f"Shutting down {SERVICE_TITLE}")
-    
-    if state.db_pool:
-        await state.db_pool.close()
-        logger.info("Database pool closed")
-    
-    logger.info(f"{SERVICE_TITLE} shutdown complete")
-
-async def verify_schema():
-    """Verify v5.0 normalized schema is deployed"""
-    try:
-        # Check positions table uses security_id FK
-        has_security_id = await state.db_pool.fetchval("""
-            SELECT EXISTS (
-                SELECT FROM information_schema.columns 
-                WHERE table_name = 'positions' 
-                AND column_name = 'security_id'
-            )
-        """)
-        
-        if not has_security_id:
-            raise ValueError(
-                "positions table missing security_id column - schema v5.0 not deployed!"
-            )
-        
-        logger.info("âœ… Normalized schema v5.0 verified")
-        
-    except asyncpg.PostgresError as e:
-        logger.critical(f"Schema verification failed: {e}", exc_info=True)
-        raise
-
-# Initialize FastAPI with lifespan
+# Initialize FastAPI
 app = FastAPI(
     title=SERVICE_TITLE,
     version=SERVICE_VERSION,
-    description=f"Trading execution with {SCHEMA_VERSION} + rigorous error handling",
-    lifespan=lifespan  # âœ… Use lifespan instead of on_event
+    description=f"Trading execution with {SCHEMA_VERSION} + rigorous error handling"
 )
 
 app.add_middleware(
@@ -270,17 +183,11 @@ async def get_security_id(symbol: str) -> int:
         raise
 
 # ============================================================================
-# STARTUP & SHUTDOWN (FastAPI Lifespan Pattern)
+# STARTUP & SHUTDOWN
 # ============================================================================
-from contextlib import asynccontextmanager
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """
-    FastAPI lifespan context manager for startup/shutdown.
-    Replaces deprecated @app.on_event decorators.
-    """
-    # STARTUP
+@app.on_event("startup")
+async def startup():
+    """Initialize database connection pool with error handling"""
     logger.info(f"Starting {SERVICE_TITLE} v{SERVICE_VERSION}")
     
     try:
@@ -313,18 +220,6 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.critical(f"Unexpected startup error: {e}", exc_info=True)
         raise
-    
-    # YIELD CONTROL TO APPLICATION
-    yield
-    
-    # SHUTDOWN
-    logger.info(f"Shutting down {SERVICE_TITLE}")
-    
-    if state.db_pool:
-        await state.db_pool.close()
-        logger.info("Database pool closed")
-    
-    logger.info(f"{SERVICE_TITLE} shutdown complete")
 
 async def verify_schema():
     """Verify v5.0 normalized schema is deployed"""
@@ -348,6 +243,17 @@ async def verify_schema():
     except asyncpg.PostgresError as e:
         logger.critical(f"Schema verification failed: {e}", exc_info=True)
         raise
+
+@app.on_event("shutdown")
+async def shutdown():
+    """Clean up database connections"""
+    logger.info(f"Shutting down {SERVICE_TITLE}")
+    
+    if state.db_pool:
+        await state.db_pool.close()
+        logger.info("Database pool closed")
+    
+    logger.info(f"{SERVICE_TITLE} shutdown complete")
 
 # ============================================================================
 # API ENDPOINTS
@@ -914,7 +820,6 @@ if __name__ == "__main__":
     print("âœ… Structured logging with context")
     print("âœ… HTTPException with proper status codes")
     print(f"âœ… Handles REAL MONEY - Critical safety layer")
-    print("âœ… FastAPI lifespan (no deprecation warnings)")  # âœ… NEW
     print(f"Port: {SERVICE_PORT}")
     print("=" * 70)
     
