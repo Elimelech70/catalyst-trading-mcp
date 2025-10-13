@@ -159,7 +159,7 @@ services:
       DATABASE_URL: ${DATABASE_URL}
       SERVICE_PORT: 5004
     ports:
-      - "5004:5004"
+      - "5002:5002"
     volumes:
       - pattern_logs:/app/logs
     networks:
