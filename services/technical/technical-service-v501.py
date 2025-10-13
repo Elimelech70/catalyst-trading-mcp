@@ -2,24 +2,11 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: technical-service.py
-Version: 5.0.3
+Version: 5.0.1
 Last Updated: 2025-10-13
 Purpose: Technical analysis with normalized schema v5.0 (security_id + time_id FKs)
 
 REVISION HISTORY:
-v5.0.3 (2025-10-13) - Database Query Fixes
-- ✅ Fixed boolean parameter handling (unusual_volume_flag)
-- ✅ Fixed INTERVAL parameterization in SQL queries
-- ✅ Proper asyncpg type casting for PostgreSQL
-- ✅ Resolved "invalid input for query argument" errors
-
-v5.0.2 (2025-10-13) - Endpoint Compatibility Fix
-- ✅ Added POST /api/v1/indicators/calculate (expected by orchestration)
-- ✅ Added GET /api/v1/indicators/{symbol}/latest (expected by deploy script)
-- ✅ Kept backward compatibility with existing endpoints
-- ✅ Fixed 405 Method Not Allowed errors
-- ✅ Fixed 404 Not Found errors
-
 v5.0.1 (2025-10-13) - Pydantic V2 Migration
 - ✅ Migrated @validator to @field_validator (Pydantic V2)
 - ✅ Added @classmethod decorators to validators
@@ -74,7 +61,7 @@ logger = logging.getLogger(__name__)
 class Config:
     """Service configuration"""
     SERVICE_NAME = "technical-service"
-    VERSION = "5.0.3"  # ✅ Database query fixes
+    VERSION = "5.0.1"  # ✅ Updated version
     PORT = 5003
     DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://catalyst:catalyst@localhost:5432/catalyst_trading")
     POOL_MIN_SIZE = 2
@@ -443,7 +430,7 @@ async def calculate_indicators_endpoint(
         avg_volume = np.mean(volumes[-20:]) if len(volumes) >= 20 else np.mean(volumes)
         current_volume = volumes[-1]
         volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1.0
-        unusual_volume = bool(volume_ratio > 1.5)  # ✅ Explicit bool cast for PostgreSQL
+        unusual_volume = volume_ratio > 1.5
         
         # Step 4: Store indicators with FKs
         await conn.execute("""
@@ -547,9 +534,6 @@ async def get_indicators(
     try:
         security_id = await get_security_id(conn, symbol)
         
-        # ✅ Calculate timestamp in Python (can't parameterize inside INTERVAL)
-        time_threshold = datetime.utcnow() - timedelta(hours=hours)
-        
         rows = await conn.fetch("""
             SELECT 
                 ti.*,
@@ -561,10 +545,10 @@ async def get_indicators(
             JOIN time_dimension td ON td.time_id = ti.time_id
             WHERE ti.security_id = $1
                 AND ti.timeframe = $2
-                AND td.timestamp >= $3
+                AND td.timestamp >= NOW() - INTERVAL '$3 hours'
             ORDER BY td.timestamp DESC
             LIMIT 100
-        """, security_id, timeframe, time_threshold)
+        """, security_id, timeframe, hours)
         
         if not rows:
             raise HTTPException(status_code=404, detail=f"No indicators found for {symbol}")
@@ -593,41 +577,6 @@ async def get_indicators(
     except Exception as e:
         logger.error(f"Error fetching indicators: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-# ============================================================================
-# ENDPOINT ALIASES (For Orchestration Service Compatibility)
-# ============================================================================
-
-@app.post("/api/v1/indicators/calculate", response_model=IndicatorResponse)
-async def calculate_indicators_alias(
-    request: IndicatorRequest,
-    conn: asyncpg.Connection = Depends(get_db)
-):
-    """
-    Endpoint alias for orchestration service compatibility.
-    
-    This is an alias to POST /api/v1/calculate
-    Both endpoints call the same underlying function.
-    """
-    return await calculate_indicators_endpoint(request, conn)
-
-@app.get("/api/v1/indicators/{symbol}/latest")
-async def get_latest_indicators(
-    symbol: str,
-    timeframe: str = "5min",
-    conn: asyncpg.Connection = Depends(get_db)
-):
-    """
-    Get latest indicators for a symbol (deployment script compatibility).
-    
-    This is an alias to GET /api/v1/indicators/{symbol}
-    Returns most recent indicators only (last 1 hour).
-    """
-    return await get_indicators(symbol, hours=1, timeframe=timeframe, conn=conn)
-
-# ============================================================================
-# HEALTH CHECK
-# ============================================================================
 
 @app.get("/health")
 async def health_check():
