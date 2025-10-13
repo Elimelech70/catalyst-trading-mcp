@@ -148,24 +148,6 @@ async def lifespan(app: FastAPI):
             if not securities_exists:
                 raise RuntimeError("securities table not found! Run schema v5.0 first.")
             
-            # Check for risk tables (OPTIONAL - warn if missing, don't crash)
-            risk_tables = await conn.fetch("""
-                SELECT table_name 
-                FROM information_schema.tables
-                WHERE table_schema = 'public'
-                AND table_name IN ('risk_parameters', 'daily_risk_metrics', 'risk_events')
-            """)
-            
-            risk_table_names = {r['table_name'] for r in risk_tables}
-            missing_tables = {'risk_parameters', 'daily_risk_metrics', 'risk_events'} - risk_table_names
-            
-            if missing_tables:
-                logger.warning(f"⚠️ Missing risk tables: {missing_tables}")
-                logger.warning(f"⚠️ Run: psql $DATABASE_URL -f add-risk-tables-v50.sql")
-                logger.warning(f"⚠️ Service will use default parameters until tables are created")
-            else:
-                logger.info(f"✅ All risk tables present")
-            
             logger.info(f"✅ Schema validation passed - {SCHEMA_VERSION}")
         
         logger.info(f"✅ {SERVICE_NAME} ready on port {SERVICE_PORT}")
@@ -207,7 +189,7 @@ app.add_middleware(
 
 class PositionRiskRequest(BaseModel):
     """Request to validate a position risk"""
-    cycle_id: str  # VARCHAR(20) in database
+    cycle_id: int
     symbol: str
     side: str  # 'long' or 'short'
     quantity: int = Field(gt=0)
@@ -265,33 +247,25 @@ async def get_security_id(conn: asyncpg.Connection, symbol: str) -> int:
     
     return security_id
 
-async def get_risk_parameters(conn: asyncpg.Connection, cycle_id: str) -> Dict[str, Any]:
-    """
-    Get risk parameters for the current cycle.
-    Falls back to defaults if risk_parameters table doesn't exist yet.
-    """
-    try:
-        params = await conn.fetchrow("""
-            SELECT 
-                max_positions,
-                max_position_size_usd,
-                max_daily_loss_usd,
-                max_sector_exposure_pct,
-                min_risk_reward_ratio
-            FROM risk_parameters
-            WHERE cycle_id = $1
-            ORDER BY created_at DESC
-            LIMIT 1
-        """, cycle_id)
-        
-        if params:
-            return dict(params)
-    except asyncpg.UndefinedTableError:
-        logger.warning("risk_parameters table not found, using defaults")
-    except Exception as e:
-        logger.warning(f"Error fetching risk parameters: {e}, using defaults")
+async def get_risk_parameters(conn: asyncpg.Connection, cycle_id: int) -> Dict[str, Any]:
+    """Get risk parameters for the current cycle"""
+    params = await conn.fetchrow("""
+        SELECT 
+            max_positions,
+            max_position_size_usd,
+            max_daily_loss_usd,
+            max_sector_exposure_pct,
+            min_risk_reward_ratio
+        FROM risk_parameters
+        WHERE cycle_id = $1
+        ORDER BY created_at DESC
+        LIMIT 1
+    """, cycle_id)
     
-    # Return defaults if table doesn't exist or no params found
+    if params:
+        return dict(params)
+    
+    # Return defaults if no custom parameters
     return {
         'max_positions': Config.MAX_POSITIONS,
         'max_position_size_usd': Config.MAX_POSITION_SIZE_USD,
@@ -302,7 +276,7 @@ async def get_risk_parameters(conn: asyncpg.Connection, cycle_id: str) -> Dict[s
 
 async def get_sector_exposure(
     conn: asyncpg.Connection, 
-    cycle_id: str, 
+    cycle_id: int, 
     security_id: Optional[int] = None
 ) -> Dict[str, Any]:
     """
@@ -368,7 +342,7 @@ async def get_sector_exposure(
         'exposure_pct': exposure_pct
     }
 
-async def get_daily_pnl(conn: asyncpg.Connection, cycle_id: str) -> float:
+async def get_daily_pnl(conn: asyncpg.Connection, cycle_id: int) -> float:
     """Get today's P&L for the cycle"""
     today = date.today()
     
@@ -383,7 +357,7 @@ async def get_daily_pnl(conn: asyncpg.Connection, cycle_id: str) -> float:
 
 async def log_risk_event(
     conn: asyncpg.Connection,
-    cycle_id: str,
+    cycle_id: int,
     security_id: int,
     event_type: RiskEventType,
     risk_level: RiskLevel,
@@ -396,22 +370,16 @@ async def log_risk_event(
     v5.0 Pattern:
     - Uses security_id FK (NOT symbol VARCHAR)
     - Stores metadata as JSON
-    - Gracefully handles missing risk_events table
     """
-    try:
-        await conn.execute("""
-            INSERT INTO risk_events (
-                cycle_id, security_id, event_type, risk_level,
-                description, metadata
-            ) VALUES ($1, $2, $3, $4, $5, $6)
-        """, 
-            cycle_id, security_id, event_type.value, risk_level.value,
-            description, json.dumps(metadata or {})
-        )
-    except asyncpg.UndefinedTableError:
-        logger.warning(f"risk_events table not found, event not logged: {description}")
-    except Exception as e:
-        logger.error(f"Failed to log risk event: {e}", exc_info=True)
+    await conn.execute("""
+        INSERT INTO risk_events (
+            cycle_id, security_id, event_type, risk_level,
+            description, metadata
+        ) VALUES ($1, $2, $3, $4, $5, $6)
+    """, 
+        cycle_id, security_id, event_type.value, risk_level.value,
+        description, json.dumps(metadata or {})
+    )
 
 # ============================================================================
 # API ENDPOINTS
@@ -552,7 +520,7 @@ async def validate_position(request: PositionRiskRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/v1/exposure/{cycle_id}")
-async def get_cycle_exposure(cycle_id: str):
+async def get_cycle_exposure(cycle_id: int):
     """
     Get exposure breakdown by sector for a cycle.
     
@@ -613,7 +581,7 @@ async def get_cycle_exposure(cycle_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/v1/metrics/{cycle_id}")
-async def get_risk_metrics(cycle_id: str):
+async def get_risk_metrics(cycle_id: int):
     """Get real-time risk metrics for a cycle"""
     try:
         async with state.db_pool.acquire() as conn:
@@ -656,7 +624,7 @@ async def get_risk_metrics(cycle_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/v1/parameters/{cycle_id}")
-async def get_cycle_parameters(cycle_id: str):
+async def get_cycle_parameters(cycle_id: int):
     """Get risk parameters for a cycle"""
     try:
         async with state.db_pool.acquire() as conn:
