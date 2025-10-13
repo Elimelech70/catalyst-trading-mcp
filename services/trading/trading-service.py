@@ -2,11 +2,16 @@
 
 # Name of Application: Catalyst Trading System
 # Name of file: trading-service.py
-# Version: 5.1.1
+# Version: 5.1.2
 # Last Updated: 2025-10-13
 # Purpose: Trading service with RIGOROUS error handling (Playbook v3.0 Compliant)
 
 # REVISION HISTORY:
+# v5.1.2 (2025-10-13) - Production-Safe Logging
+# - Removed Unicode emojis from logs (breaks log parsers)
+# - Using [OK] prefix instead of checkmarks
+# - Clean ASCII output for production systems
+#
 # v5.1.1 (2025-10-13) - FastAPI Lifespan Migration
 # - Migrated from deprecated @app.on_event to lifespan context manager
 # - Eliminates FastAPI deprecation warnings
@@ -55,7 +60,7 @@ from decimal import Decimal
 # SERVICE METADATA
 # ============================================================================
 SERVICE_NAME = "trading"
-SERVICE_VERSION = "5.1.1"  # âœ… Updated: FastAPI lifespan migration
+SERVICE_VERSION = "5.1.2"  # Production-safe: No Unicode emojis in logs
 SERVICE_TITLE = "Trading Service"
 SCHEMA_VERSION = "v5.0 normalized"
 SERVICE_PORT = 5005
@@ -134,7 +139,7 @@ async def verify_schema():
                 "positions table missing security_id column - schema v5.0 not deployed!"
             )
         
-        logger.info("âœ… Normalized schema v5.0 verified")
+        logger.info("[OK] Normalized schema v5.0 verified")
         
     except asyncpg.PostgresError as e:
         logger.critical(f"Schema verification failed: {e}", exc_info=True)
@@ -906,15 +911,15 @@ async def get_active_positions(cycle_id: Optional[str] = None):
 # ============================================================================
 if __name__ == "__main__":
     print("=" * 70)
-    print(f"ðŸŽ© Catalyst Trading System - {SERVICE_TITLE} v{SERVICE_VERSION}")
+    print(f"Catalyst Trading System - {SERVICE_TITLE} v{SERVICE_VERSION}")
     print("=" * 70)
-    print(f"âœ… {SCHEMA_VERSION} with security_id FKs")
-    print("âœ… RIGOROUS error handling - NO silent failures")
-    print("âœ… Specific exception types (not generic)")
-    print("âœ… Structured logging with context")
-    print("âœ… HTTPException with proper status codes")
-    print(f"âœ… Handles REAL MONEY - Critical safety layer")
-    print("âœ… FastAPI lifespan (no deprecation warnings)")  # âœ… NEW
+    print(f"[OK] {SCHEMA_VERSION} with security_id FKs")
+    print("[OK] RIGOROUS error handling - NO silent failures")
+    print("[OK] Specific exception types (not generic)")
+    print("[OK] Structured logging with context")
+    print("[OK] HTTPException with proper status codes")
+    print("[OK] Handles REAL MONEY - Critical safety layer")
+    print("[OK] FastAPI lifespan (no deprecation warnings)")
     print(f"Port: {SERVICE_PORT}")
     print("=" * 70)
     
