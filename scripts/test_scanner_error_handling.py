@@ -103,7 +103,10 @@ def sample_candidates():
             'change_percent': 2.5,
             'catalyst_strength': 0.8,
             'catalyst_count': 3,
-            'catalyst_types': ['earnings', 'upgrade']
+            'catalyst_types': ['earnings', 'upgrade'],
+            'technical_score': 0.75,  # ← ADDED
+            'composite_score': 0.78,  # ← ADDED
+            'selected': False
         },
         {
             'symbol': 'MSFT',
@@ -113,7 +116,10 @@ def sample_candidates():
             'change_percent': 1.5,
             'catalyst_strength': 0.6,
             'catalyst_count': 2,
-            'catalyst_types': ['news']
+            'catalyst_types': ['news'],
+            'technical_score': 0.65,  # ← ADDED
+            'composite_score': 0.63,  # ← ADDED
+            'selected': False
         },
         {
             'symbol': 'GOOGL',
@@ -123,7 +129,10 @@ def sample_candidates():
             'change_percent': -1.0,
             'catalyst_strength': 0.4,
             'catalyst_count': 1,
-            'catalyst_types': ['news']
+            'catalyst_types': ['news'],
+            'technical_score': 0.45,  # ← ADDED
+            'composite_score': 0.43,  # ← ADDED
+            'selected': False
         }
     ]
 
