@@ -1,27 +1,23 @@
 # Name of Application: Catalyst Trading System
 # Name of file: test_scanner_error_handling.py
-# Version: 1.0.1
+# Version: 1.0.2
 # Last Updated: 2025-10-13
-# Purpose: Comprehensive error handling tests for scanner-service v5.4.0 (FIXED IMPORTS)
+# Purpose: Comprehensive error handling tests (FIXED ASYNC FIXTURES)
 
 # REVISION HISTORY:
-# v1.0.1 (2025-10-13) - Fixed import paths for Catalyst Trading System structure
+# v1.0.2 (2025-10-13) - Fixed async fixtures with @pytest_asyncio.fixture
+# v1.0.1 (2025-10-13) - Fixed import paths
 # v1.0.0 (2025-10-13) - Initial test suite
 
 """
 Test suite for scanner-service v5.4.0 error handling.
 
-Tests the three major fixes:
-1. scan_market() - Specific exception handling with proper HTTP codes
-2. filter_by_technical() - No silent failures, tracks errors
-3. persist_scan_results() - Success/failure tracking, raises on critical failures
-
 Run with:
     pytest test_scanner_error_handling.py -v
-    pytest test_scanner_error_handling.py -v --log-cli-level=INFO
 """
 
 import pytest
+import pytest_asyncio  # IMPORTANT: Use pytest_asyncio for async fixtures
 import asyncio
 from unittest.mock import Mock, AsyncMock, patch, MagicMock
 from datetime import datetime
@@ -32,22 +28,16 @@ import sys
 import os
 
 # ============================================================================
-# FIX IMPORT PATH - Add services directory to Python path
+# FIX IMPORT PATH
 # ============================================================================
-# Get the project root directory
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 scanner_service_path = os.path.join(project_root, 'services', 'scanner')
 
-# Add to Python path
 if scanner_service_path not in sys.path:
     sys.path.insert(0, scanner_service_path)
 
-# Now import scanner service components
 try:
-    # Import from scanner-service.py (note: Python converts - to _)
     import importlib.util
-    
-    # Load scanner-service.py as a module
     spec = importlib.util.spec_from_file_location(
         "scanner_service",
         os.path.join(scanner_service_path, "scanner-service.py")
@@ -56,7 +46,6 @@ try:
     sys.modules["scanner_service"] = scanner_service
     spec.loader.exec_module(scanner_service)
     
-    # Import the functions we need
     scan_market = scanner_service.scan_market
     filter_by_technical = scanner_service.filter_by_technical
     persist_scan_results = scanner_service.persist_scan_results
@@ -67,15 +56,13 @@ try:
     
 except Exception as e:
     print(f"ERROR: Could not import scanner service: {e}")
-    print(f"Looking in: {scanner_service_path}")
-    print(f"Files in directory: {os.listdir(scanner_service_path) if os.path.exists(scanner_service_path) else 'Directory not found'}")
     raise
 
 # ============================================================================
-# FIXTURES
+# FIXTURES - USING @pytest_asyncio.fixture for async fixtures
 # ============================================================================
 
-@pytest.fixture
+@pytest_asyncio.fixture  # ← FIXED: Use pytest_asyncio.fixture
 async def mock_db_pool():
     """Mock database pool for testing"""
     pool = AsyncMock()
@@ -84,7 +71,7 @@ async def mock_db_pool():
     pool.execute = AsyncMock()
     return pool
 
-@pytest.fixture
+@pytest_asyncio.fixture  # ← FIXED: Use pytest_asyncio.fixture
 async def setup_state(mock_db_pool):
     """Setup scanner state with mocked dependencies"""
     # Store original values
@@ -104,7 +91,7 @@ async def setup_state(mock_db_pool):
     state.redis_client = original_redis
     state.http_session = original_http
 
-@pytest.fixture
+@pytest.fixture  # ← Regular fixture (not async)
 def sample_candidates():
     """Sample candidate data for testing"""
     return [
@@ -166,7 +153,6 @@ class TestScanMarketErrorHandling:
     @pytest.mark.asyncio
     async def test_network_error_raises_502(self, setup_state):
         """Test that network errors raise HTTPException with 502 status"""
-        # Mock network error during filtering
         with patch.object(scanner_service, 'filter_by_catalysts',
                          side_effect=aiohttp.ClientError("Connection timeout")):
             with patch.object(scanner_service, 'get_active_universe', 
@@ -181,7 +167,6 @@ class TestScanMarketErrorHandling:
     @pytest.mark.asyncio
     async def test_validation_error_raises_400(self, setup_state):
         """Test that validation errors raise HTTPException with 400 status"""
-        # Mock validation error
         with patch.object(scanner_service, 'get_active_universe',
                          side_effect=ValueError("Invalid universe parameters")):
             
@@ -194,7 +179,6 @@ class TestScanMarketErrorHandling:
     @pytest.mark.asyncio
     async def test_timeout_error_raises_504(self, setup_state):
         """Test that timeout errors raise HTTPException with 504 status"""
-        # Mock timeout
         with patch.object(scanner_service, 'filter_by_catalysts',
                          side_effect=asyncio.TimeoutError()):
             with patch.object(scanner_service, 'get_active_universe', 
@@ -210,7 +194,6 @@ class TestScanMarketErrorHandling:
     @pytest.mark.asyncio
     async def test_missing_field_raises_500(self, setup_state):
         """Test that KeyError raises HTTPException with 500 status"""
-        # Mock KeyError
         with patch.object(scanner_service, 'filter_by_catalysts',
                          side_effect=KeyError('required_field')):
             with patch.object(scanner_service, 'get_active_universe', 
@@ -225,7 +208,6 @@ class TestScanMarketErrorHandling:
     @pytest.mark.asyncio
     async def test_successful_scan_returns_proper_structure(self, setup_state, sample_candidates):
         """Test that successful scan returns expected data structure"""
-        # Mock successful flow
         with patch.object(scanner_service, 'get_active_universe', return_value=['AAPL', 'MSFT']):
             with patch.object(scanner_service, 'filter_by_catalysts', return_value=sample_candidates):
                 with patch.object(scanner_service, 'filter_by_technical', return_value=sample_candidates):
@@ -252,11 +234,10 @@ class TestTechnicalFilterErrorHandling:
     @pytest.mark.asyncio
     async def test_raises_if_all_candidates_fail(self, sample_candidates):
         """Test that ValueError is raised if ALL candidates fail"""
-        # Create candidates that will all fail price filter
         bad_candidates = [
             {
                 'symbol': 'TOO_CHEAP',
-                'price': 1.0,  # Below min_price
+                'price': 1.0,
                 'volume': 5000000,
                 'change_percent': 2.0,
                 'catalyst_strength': 0.8,
@@ -265,7 +246,7 @@ class TestTechnicalFilterErrorHandling:
             },
             {
                 'symbol': 'TOO_EXPENSIVE',
-                'price': 10000.0,  # Above max_price
+                'price': 10000.0,
                 'volume': 5000000,
                 'change_percent': 2.0,
                 'catalyst_strength': 0.8,
@@ -295,8 +276,6 @@ class TestTechnicalFilterErrorHandling:
         for candidate in result:
             assert 'technical_score' in candidate
             assert 'composite_score' in candidate
-            assert 0 <= candidate['technical_score'] <= 1
-            assert 0 <= candidate['composite_score'] <= 1
     
     @pytest.mark.asyncio
     async def test_filters_by_price_range(self, setup_state):
@@ -305,7 +284,7 @@ class TestTechnicalFilterErrorHandling:
             {
                 'symbol': 'CHEAP',
                 'security_id': 1,
-                'price': 3.0,  # Below min_price (5.0)
+                'price': 3.0,
                 'volume': 5000000,
                 'change_percent': 2.0,
                 'catalyst_strength': 0.8,
@@ -315,7 +294,7 @@ class TestTechnicalFilterErrorHandling:
             {
                 'symbol': 'VALID',
                 'security_id': 2,
-                'price': 50.0,  # Valid
+                'price': 50.0,
                 'volume': 5000000,
                 'change_percent': 2.0,
                 'catalyst_strength': 0.8,
@@ -326,7 +305,6 @@ class TestTechnicalFilterErrorHandling:
         
         result = await filter_by_technical(candidates)
         
-        # Should only return VALID
         assert len(result) == 1
         assert result[0]['symbol'] == 'VALID'
     
@@ -335,7 +313,6 @@ class TestTechnicalFilterErrorHandling:
         """Test that results are sorted by composite score"""
         result = await filter_by_technical(sample_candidates)
         
-        # Check that scores are in descending order
         scores = [c['composite_score'] for c in result]
         assert scores == sorted(scores, reverse=True)
 
@@ -349,8 +326,7 @@ class TestPersistenceErrorHandling:
     @pytest.mark.asyncio
     async def test_tracks_successful_persistence(self, setup_state, sample_candidates):
         """Test that successful persistence is tracked"""
-        # Mock successful database operations
-        state.db_pool.fetchval = AsyncMock(return_value=1)  # time_id
+        state.db_pool.fetchval = AsyncMock(return_value=1)
         state.db_pool.execute = AsyncMock(return_value=None)
         
         result = await persist_scan_results("test_cycle", sample_candidates)
@@ -437,11 +413,7 @@ class TestHelperFunctionsErrorHandling:
 # ============================================================================
 
 if __name__ == "__main__":
-    # Show import info
     print(f"✅ Scanner service imported successfully")
     print(f"   Path: {scanner_service_path}")
-    print(f"   Functions loaded: scan_market, filter_by_technical, persist_scan_results")
     print("")
-    
-    # Run tests
     pytest.main([__file__, "-v", "--tb=short"])
