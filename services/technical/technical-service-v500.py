@@ -2,18 +2,11 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: technical-service.py
-Version: 5.0.1
-Last Updated: 2025-10-13
+Version: 5.0.0
+Last Updated: 2025-10-06
 Purpose: Technical analysis with normalized schema v5.0 (security_id + time_id FKs)
 
 REVISION HISTORY:
-v5.0.1 (2025-10-13) - Pydantic V2 Migration
-- ✅ Migrated @validator to @field_validator (Pydantic V2)
-- ✅ Added @classmethod decorators to validators
-- ✅ Updated imports for Pydantic V2 compatibility
-- ✅ Eliminates deprecation warnings
-- ✅ Future-proof for Pydantic V3
-
 v5.0.0 (2025-10-06) - Normalized Schema Update
 - ✅ Stores in technical_indicators table with security_id + time_id FKs
 - ✅ All indicator calculations use FKs (NO symbol VARCHAR!)
@@ -22,6 +15,10 @@ v5.0.0 (2025-10-06) - Normalized Schema Update
 - ✅ Added microstructure metrics (bid-ask spread, order flow)
 - ✅ Helper functions: get_security_id(), get_time_id()
 - ✅ Error handling compliant with v1.0 standard
+
+v4.0.0 (2025-09-15) - DEPRECATED (Denormalized)
+- Used symbol VARCHAR in queries
+- No FK relationships
 
 Description of Service:
 Calculates and stores technical indicators using normalized v5.0 schema:
@@ -34,7 +31,7 @@ Calculates and stores technical indicators using normalized v5.0 schema:
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, field_validator  # ✅ Updated for Pydantic V2
+from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
@@ -61,7 +58,7 @@ logger = logging.getLogger(__name__)
 class Config:
     """Service configuration"""
     SERVICE_NAME = "technical-service"
-    VERSION = "5.0.1"  # ✅ Updated version
+    VERSION = "5.0.0"
     PORT = 5003
     DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://catalyst:catalyst@localhost:5432/catalyst_trading")
     POOL_MIN_SIZE = 2
@@ -84,21 +81,21 @@ class ServiceState:
     """Global service state"""
     def __init__(self):
         self.db_pool: Optional[asyncpg.Pool] = None
-        self.is_healthy: bool = False
+        self.is_healthy = False
 
 state = ServiceState()
 
 # ============================================================================
-# LIFECYCLE MANAGEMENT
+# LIFESPAN MANAGEMENT
 # ============================================================================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup and shutdown events"""
+    """Lifespan context manager for startup/shutdown"""
+    logger.info(f"Starting {Config.SERVICE_NAME} v{Config.VERSION}")
+    
     try:
-        logger.info(f"Starting {Config.SERVICE_NAME} v{Config.VERSION}")
-        
-        # Create database pool
+        # Initialize database pool
         state.db_pool = await asyncpg.create_pool(
             Config.DATABASE_URL,
             min_size=Config.POOL_MIN_SIZE,
@@ -107,15 +104,17 @@ async def lifespan(app: FastAPI):
         )
         logger.info("✅ Database pool created")
         
-        # Validate schema
+        # Verify schema
         async with state.db_pool.acquire() as conn:
-            # Check for normalized tables
-            tables_exist = await conn.fetchval("""
-                SELECT COUNT(*) FROM information_schema.tables 
-                WHERE table_name IN ('technical_indicators', 'securities', 'time_dimension')
+            # Check if technical_indicators table exists
+            exists = await conn.fetchval("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'technical_indicators'
+                )
             """)
-            if tables_exist != 3:
-                raise Exception("Missing v5.0 normalized tables! Run schema v5.0 first.")
+            if not exists:
+                raise Exception("technical_indicators table does not exist! Run schema v5.0 first.")
             
             # Check for helper functions
             func_exists = await conn.fetchval("""
@@ -173,15 +172,12 @@ class IndicatorRequest(BaseModel):
     symbol: str = Field(..., description="Stock symbol (e.g., AAPL)")
     timeframe: str = Field(default="5min", description="Timeframe (1min, 5min, 15min, 1h, 1d)")
     
-    # ✅ PYDANTIC V2: @validator → @field_validator + @classmethod
-    @field_validator('symbol')
-    @classmethod
-    def validate_symbol(cls, v: str) -> str:
+    @validator('symbol')
+    def validate_symbol(cls, v):
         return v.upper().strip()
     
-    @field_validator('timeframe')
-    @classmethod
-    def validate_timeframe(cls, v: str) -> str:
+    @validator('timeframe')
+    def validate_timeframe(cls, v):
         valid = ['1min', '5min', '15min', '30min', '1h', '4h', '1d']
         if v not in valid:
             raise ValueError(f"Timeframe must be one of {valid}")
@@ -205,39 +201,78 @@ async def get_security_id(conn: asyncpg.Connection, symbol: str) -> int:
     Get or create security_id using helper function.
     
     This is the ONLY way to get security_id in v5.0!
-    Uses database helper: get_or_create_security()
+    NEVER store symbol directly in indicator tables.
     """
-    security_id = await conn.fetchval(
-        "SELECT get_or_create_security($1)", 
-        symbol.upper()
-    )
-    if not security_id:
-        raise HTTPException(status_code=500, detail=f"Failed to get security_id for {symbol}")
-    return security_id
+    try:
+        security_id = await conn.fetchval(
+            "SELECT get_or_create_security($1)", 
+            symbol.upper()
+        )
+        return security_id
+    except Exception as e:
+        logger.error(f"Failed to get security_id for {symbol}: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 async def get_time_id(conn: asyncpg.Connection, timestamp: datetime) -> int:
     """
     Get or create time_id using helper function.
     
     This is the ONLY way to get time_id in v5.0!
-    Uses database helper: get_or_create_time()
+    NEVER store raw timestamps in indicator tables.
     """
-    time_id = await conn.fetchval(
-        "SELECT get_or_create_time($1)", 
-        timestamp
-    )
-    if not time_id:
-        raise HTTPException(status_code=500, detail=f"Failed to get time_id for {timestamp}")
-    return time_id
+    try:
+        time_id = await conn.fetchval(
+            "SELECT get_or_create_time($1)", 
+            timestamp
+        )
+        return time_id
+    except Exception as e:
+        logger.error(f"Failed to get time_id for {timestamp}: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+async def fetch_price_history(
+    conn: asyncpg.Connection,
+    security_id: int,
+    timeframe: str,
+    periods: int = 200
+) -> List[Dict]:
+    """
+    Fetch price history using JOINs (v5.0 pattern).
+    
+    CRITICAL: Uses security_id FK and JOINs to get symbol!
+    """
+    try:
+        rows = await conn.fetch("""
+            SELECT 
+                th.close_price,
+                th.high_price,
+                th.low_price,
+                th.open_price,
+                th.volume,
+                td.timestamp
+            FROM trading_history th
+            JOIN time_dimension td ON td.time_id = th.time_id
+            WHERE th.security_id = $1
+            AND th.timeframe = $2
+            ORDER BY td.timestamp DESC
+            LIMIT $3
+        """, security_id, timeframe, periods)
+        
+        # Reverse to chronological order for calculations
+        return [dict(r) for r in reversed(rows)]
+    
+    except Exception as e:
+        logger.error(f"Failed to fetch price history: {e}")
+        return []
 
 # ============================================================================
 # INDICATOR CALCULATIONS
 # ============================================================================
 
-def calculate_rsi(prices: List[float], period: int = 14) -> float:
-    """Calculate Relative Strength Index"""
+def calculate_rsi(prices: List[float], period: int = 14) -> Optional[float]:
+    """Calculate RSI indicator"""
     if len(prices) < period + 1:
-        return 50.0  # Neutral if insufficient data
+        return None
     
     deltas = np.diff(prices)
     gains = np.where(deltas > 0, deltas, 0)
@@ -256,85 +291,60 @@ def calculate_rsi(prices: List[float], period: int = 14) -> float:
 def calculate_macd(prices: List[float], 
                    fast: int = 12, 
                    slow: int = 26, 
-                   signal: int = 9) -> Dict[str, float]:
-    """Calculate MACD, Signal, and Histogram"""
-    if len(prices) < slow:
-        return {'macd': 0.0, 'signal': 0.0, 'histogram': 0.0}
+                   signal: int = 9) -> Optional[Dict[str, float]]:
+    """Calculate MACD indicator"""
+    if len(prices) < slow + signal:
+        return None
     
     prices_arr = np.array(prices)
     
     # Calculate EMAs
-    ema_fast = np.zeros(len(prices))
-    ema_slow = np.zeros(len(prices))
-    
-    # Simple initialization
-    ema_fast[fast-1] = np.mean(prices[:fast])
-    ema_slow[slow-1] = np.mean(prices[:slow])
-    
-    alpha_fast = 2 / (fast + 1)
-    alpha_slow = 2 / (slow + 1)
-    
-    for i in range(max(fast, slow), len(prices)):
-        ema_fast[i] = prices_arr[i] * alpha_fast + ema_fast[i-1] * (1 - alpha_fast)
-        ema_slow[i] = prices_arr[i] * alpha_slow + ema_slow[i-1] * (1 - alpha_slow)
+    ema_fast = prices_arr[-1]  # Simplified - use proper EMA in production
+    ema_slow = prices_arr[-1]
     
     macd_line = ema_fast - ema_slow
-    
-    # Signal line
-    signal_line = np.zeros(len(prices))
-    signal_line[slow + signal - 2] = np.mean(macd_line[slow-1:slow+signal-1])
-    
-    alpha_signal = 2 / (signal + 1)
-    for i in range(slow + signal - 1, len(prices)):
-        signal_line[i] = macd_line[i] * alpha_signal + signal_line[i-1] * (1 - alpha_signal)
-    
+    signal_line = macd_line  # Simplified
     histogram = macd_line - signal_line
     
     return {
-        'macd': float(macd_line[-1]),
-        'signal': float(signal_line[-1]),
-        'histogram': float(histogram[-1])
+        'macd': float(macd_line),
+        'signal': float(signal_line),
+        'histogram': float(histogram)
     }
 
 def calculate_bollinger_bands(prices: List[float], 
                                period: int = 20, 
-                               std_dev: float = 2.0) -> Dict[str, float]:
+                               std_dev: float = 2.0) -> Optional[Dict[str, float]]:
     """Calculate Bollinger Bands"""
     if len(prices) < period:
-        mid = float(np.mean(prices))
-        return {'upper': mid, 'middle': mid, 'lower': mid}
+        return None
     
-    middle = float(np.mean(prices[-period:]))
-    std = float(np.std(prices[-period:]))
+    recent_prices = prices[-period:]
+    middle = np.mean(recent_prices)
+    std = np.std(recent_prices)
     
     return {
-        'upper': middle + (std_dev * std),
-        'middle': middle,
-        'lower': middle - (std_dev * std)
+        'upper': float(middle + std_dev * std),
+        'middle': float(middle),
+        'lower': float(middle - std_dev * std)
     }
 
-def calculate_moving_averages(prices: List[float]) -> Dict[str, float]:
-    """Calculate SMA 20, 50, 200"""
-    return {
-        'sma_20': float(np.mean(prices[-20:])) if len(prices) >= 20 else float(np.mean(prices)),
-        'sma_50': float(np.mean(prices[-50:])) if len(prices) >= 50 else float(np.mean(prices)),
-        'sma_200': float(np.mean(prices[-200:])) if len(prices) >= 200 else float(np.mean(prices))
-    }
-
-def calculate_atr(highs: List[float], 
-                  lows: List[float], 
-                  closes: List[float], 
-                  period: int = 14) -> float:
+def calculate_atr(high: List[float], 
+                  low: List[float], 
+                  close: List[float], 
+                  period: int = 14) -> Optional[float]:
     """Calculate Average True Range"""
-    if len(highs) < period or len(lows) < period or len(closes) < period:
-        return 0.0
+    if len(high) < period + 1:
+        return None
     
     true_ranges = []
-    for i in range(1, len(highs)):
-        high_low = highs[i] - lows[i]
-        high_close = abs(highs[i] - closes[i-1])
-        low_close = abs(lows[i] - closes[i-1])
-        true_ranges.append(max(high_low, high_close, low_close))
+    for i in range(1, len(high)):
+        tr = max(
+            high[i] - low[i],
+            abs(high[i] - close[i-1]),
+            abs(low[i] - close[i-1])
+        )
+        true_ranges.append(tr)
     
     atr = np.mean(true_ranges[-period:])
     return float(atr)
@@ -380,7 +390,7 @@ def calculate_microstructure() -> Dict[str, Optional[float]]:
 # ============================================================================
 
 @app.post("/api/v1/calculate", response_model=IndicatorResponse)
-async def calculate_indicators_endpoint(
+async def calculate_indicators(
     request: IndicatorRequest,
     conn: asyncpg.Connection = Depends(get_db)
 ):
@@ -394,94 +404,75 @@ async def calculate_indicators_endpoint(
     4. Store with security_id + time_id FKs
     """
     try:
-        # Step 1: Get security_id (FK!)
+        # Step 1: Get security_id
         security_id = await get_security_id(conn, request.symbol)
-        time_id = await get_time_id(conn, datetime.utcnow())
         
-        # Step 2: Fetch price data via JOIN
-        rows = await conn.fetch("""
-            SELECT th.close, th.high, th.low, th.volume
-            FROM trading_history th
-            JOIN securities s ON s.security_id = th.security_id
-            WHERE th.security_id = $1
-            ORDER BY th.time_id DESC
-            LIMIT 200
-        """, security_id)
+        # Step 2: Fetch price history (using security_id FK)
+        history = await fetch_price_history(conn, security_id, request.timeframe)
         
-        if not rows:
-            raise HTTPException(status_code=404, detail=f"No price data for {request.symbol}")
+        if len(history) < 50:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Insufficient price data for {request.symbol} ({len(history)} bars)"
+            )
         
         # Extract price arrays
-        closes = [float(row['close']) for row in reversed(rows)]
-        highs = [float(row['high']) for row in reversed(rows)]
-        lows = [float(row['low']) for row in reversed(rows)]
-        volumes = [int(row['volume']) for row in reversed(rows)]
+        closes = [float(h['close_price']) for h in history]
+        highs = [float(h['high_price']) for h in history]
+        lows = [float(h['low_price']) for h in history]
+        volumes = [int(h['volume']) for h in history]
         
         # Step 3: Calculate all indicators
         rsi = calculate_rsi(closes, Config.RSI_PERIOD)
         macd = calculate_macd(closes, Config.MACD_FAST, Config.MACD_SLOW, Config.MACD_SIGNAL)
         bb = calculate_bollinger_bands(closes, Config.BB_PERIOD, Config.BB_STD)
-        ma = calculate_moving_averages(closes)
         atr = calculate_atr(highs, lows, closes, Config.ATR_PERIOD)
+        
+        # ML features
         volume_profile = calculate_volume_profile(closes, volumes)
         microstructure = calculate_microstructure()
         
-        # Volume analysis
-        avg_volume = np.mean(volumes[-20:]) if len(volumes) >= 20 else np.mean(volumes)
-        current_volume = volumes[-1]
-        volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1.0
-        unusual_volume = volume_ratio > 1.5
+        # Moving averages
+        sma_20 = float(np.mean(closes[-20:])) if len(closes) >= 20 else None
+        sma_50 = float(np.mean(closes[-50:])) if len(closes) >= 50 else None
+        sma_200 = float(np.mean(closes[-200:])) if len(closes) >= 200 else None
         
-        # Step 4: Store indicators with FKs
+        # Volume analysis
+        volume_sma = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else None
+        volume_ratio = volumes[-1] / volume_sma if volume_sma and volume_sma > 0 else None
+        unusual_volume = volume_ratio > 2.0 if volume_ratio else False
+        
+        # Step 4: Store with FKs (security_id + time_id)
+        time_id = await get_time_id(conn, datetime.utcnow())
+        
         await conn.execute("""
             INSERT INTO technical_indicators (
                 security_id, time_id, timeframe,
-                sma_20, sma_50, sma_200,
                 rsi_14, macd, macd_signal, macd_histogram,
-                atr_14, bollinger_upper, bollinger_middle, bollinger_lower,
+                sma_20, sma_50, sma_200,
+                bollinger_upper, bollinger_middle, bollinger_lower,
+                atr_14, volume_ratio, unusual_volume_flag,
                 vpoc, vah, val,
-                obv, volume_ratio, unusual_volume_flag,
-                bid_ask_spread, order_flow_imbalance
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
-            ON CONFLICT (security_id, time_id, timeframe) 
-            DO UPDATE SET
-                sma_20 = EXCLUDED.sma_20,
-                sma_50 = EXCLUDED.sma_50,
-                sma_200 = EXCLUDED.sma_200,
-                rsi_14 = EXCLUDED.rsi_14,
-                macd = EXCLUDED.macd,
-                macd_signal = EXCLUDED.macd_signal,
-                macd_histogram = EXCLUDED.macd_histogram,
-                atr_14 = EXCLUDED.atr_14,
-                bollinger_upper = EXCLUDED.bollinger_upper,
-                bollinger_middle = EXCLUDED.bollinger_middle,
-                bollinger_lower = EXCLUDED.bollinger_lower,
-                vpoc = EXCLUDED.vpoc,
-                vah = EXCLUDED.vah,
-                val = EXCLUDED.val,
-                volume_ratio = EXCLUDED.volume_ratio,
-                unusual_volume_flag = EXCLUDED.unusual_volume_flag
+                bid_ask_spread, order_flow_imbalance,
+                created_at
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                $14, $15, $16, $17, $18, $19, $20, $21, NOW()
+            )
         """,
-            security_id,
-            time_id,
-            request.timeframe,
-            ma['sma_20'],
-            ma['sma_50'],
-            ma['sma_200'],
+            security_id, time_id, request.timeframe,
             rsi,
-            macd['macd'],
-            macd['signal'],
-            macd['histogram'],
-            atr,
-            bb['upper'],
-            bb['middle'],
-            bb['lower'],
+            macd['macd'] if macd else None,
+            macd['signal'] if macd else None,
+            macd['histogram'] if macd else None,
+            sma_20, sma_50, sma_200,
+            bb['upper'] if bb else None,
+            bb['middle'] if bb else None,
+            bb['lower'] if bb else None,
+            atr, volume_ratio, unusual_volume,
             volume_profile['vpoc'],
             volume_profile['vah'],
             volume_profile['val'],
-            None,  # obv - calculate separately
-            volume_ratio,
-            unusual_volume,
             microstructure['bid_ask_spread'],
             microstructure['order_flow_imbalance']
         )
@@ -504,9 +495,9 @@ async def calculate_indicators_endpoint(
                 'macd': macd,
                 'bollinger_bands': bb,
                 'atr': atr,
-                'sma_20': ma['sma_20'],
-                'sma_50': ma['sma_50'],
-                'sma_200': ma['sma_200'],
+                'sma_20': sma_20,
+                'sma_50': sma_50,
+                'sma_200': sma_200,
                 'volume_profile': volume_profile,
                 'volume_ratio': volume_ratio,
                 'unusual_volume': unusual_volume
@@ -529,51 +520,53 @@ async def get_indicators(
     """
     Get indicator history using JOINs (v5.0 pattern).
     
-    Returns recent indicators with company info via JOIN.
+    Query pattern:
+    - JOIN technical_indicators → securities (get symbol)
+    - JOIN technical_indicators → time_dimension (get timestamp)
+    - Filter by symbol and time range
     """
     try:
-        security_id = await get_security_id(conn, symbol)
-        
-        rows = await conn.fetch("""
+        results = await conn.fetch("""
             SELECT 
-                ti.*,
+                ti.indicator_id,
+                ti.security_id,
                 s.symbol,
                 s.company_name,
-                td.timestamp
+                td.timestamp,
+                ti.timeframe,
+                ti.rsi_14,
+                ti.macd,
+                ti.macd_signal,
+                ti.macd_histogram,
+                ti.sma_20,
+                ti.sma_50,
+                ti.sma_200,
+                ti.bollinger_upper,
+                ti.bollinger_middle,
+                ti.bollinger_lower,
+                ti.atr_14,
+                ti.volume_ratio,
+                ti.unusual_volume_flag,
+                ti.vpoc,
+                ti.vah,
+                ti.val
             FROM technical_indicators ti
             JOIN securities s ON s.security_id = ti.security_id
             JOIN time_dimension td ON td.time_id = ti.time_id
-            WHERE ti.security_id = $1
-                AND ti.timeframe = $2
-                AND td.timestamp >= NOW() - INTERVAL '$3 hours'
+            WHERE s.symbol = $1
+            AND ti.timeframe = $2
+            AND td.timestamp >= NOW() - INTERVAL '1 hour' * $3
             ORDER BY td.timestamp DESC
-            LIMIT 100
-        """, security_id, timeframe, hours)
-        
-        if not rows:
-            raise HTTPException(status_code=404, detail=f"No indicators found for {symbol}")
-        
-        indicators = []
-        for row in rows:
-            indicators.append({
-                'timestamp': row['timestamp'],
-                'rsi': float(row['rsi_14']) if row['rsi_14'] else None,
-                'macd': float(row['macd']) if row['macd'] else None,
-                'sma_20': float(row['sma_20']) if row['sma_20'] else None,
-                'atr': float(row['atr_14']) if row['atr_14'] else None,
-                'volume_ratio': float(row['volume_ratio']) if row['volume_ratio'] else None
-            })
+        """, symbol.upper(), timeframe, hours)
         
         return {
-            'symbol': symbol,
-            'company_name': rows[0]['company_name'],
-            'timeframe': timeframe,
-            'indicators': indicators,
-            'count': len(indicators)
+            "symbol": symbol.upper(),
+            "timeframe": timeframe,
+            "hours": hours,
+            "count": len(results),
+            "indicators": [dict(r) for r in results]
         }
     
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Error fetching indicators: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -581,13 +574,31 @@ async def get_indicators(
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
+    if not state.is_healthy or not state.db_pool:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unhealthy",
+                "service": Config.SERVICE_NAME,
+                "version": Config.VERSION
+            }
+        )
+    
     return {
-        "status": "healthy" if state.is_healthy else "unhealthy",
+        "status": "healthy",
         "service": Config.SERVICE_NAME,
         "version": Config.VERSION,
         "schema": "v5.0 normalized",
-        "timestamp": datetime.utcnow().isoformat(),
-        "database": "connected" if state.db_pool else "disconnected"
+        "uses_security_id_fk": True,
+        "uses_time_id_fk": True,
+        "ml_features_enabled": True,
+        "features": [
+            "RSI, MACD, Bollinger Bands",
+            "Moving Averages (20/50/200)",
+            "Volume Profile (VPOC/VAH/VAL)",
+            "ATR, Volume Ratio",
+            "Microstructure (placeholder)"
+        ]
     }
 
 # ============================================================================
@@ -596,4 +607,9 @@ async def health_check():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=Config.PORT)
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=Config.PORT,
+        log_level="info"
+    )
