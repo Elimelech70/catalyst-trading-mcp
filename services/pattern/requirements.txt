@@ -1,4 +1,4 @@
-# MCP/FastMCP
+news-service# MCP/FastMCP
 fastmcp>=0.10.0
 asyncio-mqtt>=0.13.0
 
