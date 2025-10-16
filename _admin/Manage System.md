@@ -37,8 +37,6 @@ docker-compose up     	Creates + Starts containers	    First time or after chang
 docker-compose start	  Only Starts existing containers	Resume stopped containers
 
 ### After changes to Py or Docker or Reqirements.txt
-docker-compose up -d --build scanner
-
 docker-compose build --no-cache orchestration
 
 ### If you change docker-compose.yml
