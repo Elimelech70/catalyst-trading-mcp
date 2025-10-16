@@ -346,7 +346,7 @@ services:
   # Workflow Service (REST - Port 5010)
   # ==========================================================================
 
-  catalyst-workflow:
+  workflow:
     build: ./services/workflow
     container_name: catalyst-workflow
     ports:
