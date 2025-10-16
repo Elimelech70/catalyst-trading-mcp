@@ -362,9 +362,8 @@ services:
     networks:
       - catalyst-network
     depends_on:
-      - db
-      - catalyst-scanner
-      - catalyst-pattern
+      - scanner
+      - pattern
     restart: unless-stopped
 
 
