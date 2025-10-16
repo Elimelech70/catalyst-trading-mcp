@@ -292,6 +292,7 @@ async def analyze_symbol(symbol: str) -> Dict:
         logger.critical(f"Unexpected error: {e}", exc_info=True, extra={'symbol': symbol, 'error_type': 'unexpected'})
         raise McpError("ANALYSIS_FAILED", f"Analysis failed: {e}")
 
+@mcp.on_initialize()
 async def initialize():
     """Initialize orchestration service"""
     logger.info(f"[INIT] Orchestration Service v{SERVICE_VERSION}")
@@ -313,6 +314,7 @@ async def initialize():
     except Exception as e:
         logger.critical(f"[INIT] Initialization failed: {e}", exc_info=True, extra={'error_type': 'initialization'})
 
+@mcp.on_cleanup()
 async def cleanup():
     """Cleanup orchestration service"""
     logger.info("[CLEANUP] Shutting down orchestration")
@@ -330,17 +332,5 @@ async def cleanup():
 if __name__ == "__main__":
     logger.info("Starting Catalyst Trading MCP Orchestration Service...")
     logger.info(f"Version: {SERVICE_VERSION}")
-    
-    # Run initialization
-    asyncio.run(initialize())
-    
-    # Setup signal handlers for cleanup
-    def signal_handler(sig, frame):
-        asyncio.run(cleanup())
-        sys.exit(0)
-    
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    
-    # Run MCP server
+    logger.info(f"Configured services: {len(SERVICE_URLS)}")
     mcp.run(transport='stdio')
