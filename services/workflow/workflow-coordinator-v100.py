@@ -2,17 +2,11 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: workflow-coordinator.py
-Version: 1.0.1
+Version: 1.0.0
 Last Updated: 2025-10-16
 Purpose: HTTP service that orchestrates the trading workflow pipeline
 
 REVISION HISTORY:
-v1.0.1 (2025-10-16) - Bug fixes and improvements
-- Fixed version typo (1.0.o -> 1.0.0)
-- Added Pydantic model for workflow start request
-- Proper JSON body parsing for mode and other parameters
-- Enhanced parameter handling
-
 v1.0.0 (2025-10-16) - Initial implementation
 - Coordinates scanner → pattern → technical → risk → trading
 - Implements the 100 → 35 → 20 → 10 → 5 candidate filtering
@@ -41,7 +35,7 @@ import json
 from dataclasses import dataclass
 
 SERVICE_NAME = "workflow"
-SERVICE_VERSION = "1.0.1"  # Fixed version typo
+SERVICE_VERSION = "1.0.o"
 SERVICE_PORT = 5006
 
 # Configure logging
@@ -52,21 +46,11 @@ logging.basicConfig(
 logger = logging.getLogger("workflow")
 
 # ============================================================================
-# REQUEST MODELS
-# ============================================================================
-class WorkflowStartRequest(BaseModel):
-    """Request model for starting workflow"""
-    mode: str = Field(default="normal", description="Trading mode: normal, conservative, aggressive")
-    max_positions: Optional[int] = Field(default=5, description="Maximum positions to hold")
-    scan_frequency: Optional[int] = Field(default=300, description="Scan frequency in seconds")
-    risk_level: Optional[float] = Field(default=0.5, description="Risk level 0.0-1.0")
-
-# ============================================================================
 # CONFIGURATION
 # ============================================================================
 @dataclass
 class Config:
-    SERVICE_PORT = 5006  # Different from MCP orchestration (5000)
+    SERVICE_PORT = 5006 # Different from MCP orchestration (5000)
     DATABASE_URL = os.getenv("DATABASE_URL")
     
     # Service URLs (internal Docker network)
@@ -112,8 +96,6 @@ class WorkflowState:
         self.active_positions = []
         self.db_pool = None
         self.http_session = None
-        self.current_mode = "normal"  # Track current mode
-        self.current_params = {}      # Track current parameters
 
 state = WorkflowState()
 
@@ -123,7 +105,7 @@ state = WorkflowState()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    logger.info(f"Starting Workflow Coordinator v{SERVICE_VERSION}")
+    logger.info("Starting Workflow Coordinator v1.0.0")
     
     # Initialize database
     if config.DATABASE_URL:
@@ -152,7 +134,7 @@ async def lifespan(app: FastAPI):
 # ============================================================================
 app = FastAPI(
     title="Workflow Coordinator",
-    version=SERVICE_VERSION,
+    version="1.0.0",
     description="Orchestrates the trading workflow pipeline",
     lifespan=lifespan
 )
@@ -168,38 +150,20 @@ app.add_middleware(
 # ============================================================================
 # WORKFLOW ORCHESTRATION
 # ============================================================================
-async def run_trading_workflow(cycle_id: str, mode: str = "normal", params: Dict = None):
+async def run_trading_workflow(cycle_id: str, mode: str = "normal"):
     """
     Main workflow orchestration logic.
     Implements: Scanner → News → Pattern → Technical → Risk → Trading
-    
-    Modes affect filtering thresholds:
-    - normal: Standard thresholds
-    - conservative: Higher confidence requirements, lower risk
-    - aggressive: Lower thresholds, higher risk tolerance
     """
-    params = params or {}
-    
-    # Adjust thresholds based on mode
-    sentiment_threshold = 0.3 if mode == "normal" else (0.5 if mode == "conservative" else 0.2)
-    pattern_confidence_min = 0.6 if mode == "normal" else (0.7 if mode == "conservative" else 0.5)
-    risk_multiplier = 1.0 if mode == "normal" else (0.5 if mode == "conservative" else 1.5)
-    
     try:
         state.status = WorkflowStatus.SCANNING
         state.current_cycle = cycle_id
-        state.current_mode = mode
-        state.current_params = params
-        
         workflow_result = {
             "cycle_id": cycle_id,
             "started_at": datetime.utcnow(),
             "mode": mode,
-            "parameters": params,
             "stages": {}
         }
-        
-        logger.info(f"[{cycle_id}] Starting workflow in {mode} mode")
         
         # ========== STAGE 1: Market Scan (100 candidates) ==========
         logger.info(f"[{cycle_id}] Stage 1: Scanning market...")
@@ -222,7 +186,7 @@ async def run_trading_workflow(cycle_id: str, mode: str = "normal", params: Dict
         
         # ========== STAGE 2: News Filter (100 → 35) ==========
         state.status = WorkflowStatus.FILTERING_NEWS
-        logger.info(f"[{cycle_id}] Stage 2: Filtering by news catalysts (threshold: {sentiment_threshold})...")
+        logger.info(f"[{cycle_id}] Stage 2: Filtering by news catalysts...")
         
         news_candidates = []
         for candidate in candidates:
@@ -235,7 +199,7 @@ async def run_trading_workflow(cycle_id: str, mode: str = "normal", params: Dict
                         # Check for positive catalysts
                         if news_data.get("news"):
                             sentiment = sum(n.get("sentiment_score", 0) for n in news_data["news"]) / len(news_data["news"])
-                            if sentiment > sentiment_threshold:
+                            if sentiment > 0.3:  # Positive sentiment threshold
                                 candidate["news_sentiment"] = sentiment
                                 news_candidates.append(candidate)
             except:
@@ -246,21 +210,20 @@ async def run_trading_workflow(cycle_id: str, mode: str = "normal", params: Dict
         
         workflow_result["stages"]["news"] = {
             "candidates": len(news_candidates),
-            "filtered_out": len(candidates) - len(news_candidates),
-            "threshold_used": sentiment_threshold
+            "filtered_out": len(candidates) - len(news_candidates)
         }
         logger.info(f"[{cycle_id}] News filter: {len(news_candidates)} candidates remain")
         
         # ========== STAGE 3: Pattern Analysis (35 → 20) ==========
         state.status = WorkflowStatus.ANALYZING_PATTERNS
-        logger.info(f"[{cycle_id}] Stage 3: Analyzing patterns (min confidence: {pattern_confidence_min})...")
+        logger.info(f"[{cycle_id}] Stage 3: Analyzing patterns...")
         
         pattern_candidates = []
         for candidate in news_candidates:
             try:
                 async with state.http_session.post(
                     f"{config.PATTERN_URL}/api/v1/detect",
-                    json={"symbol": candidate["symbol"], "timeframe": "5m", "min_confidence": pattern_confidence_min}
+                    json={"symbol": candidate["symbol"], "timeframe": "5m", "min_confidence": 0.6}
                 ) as resp:
                     if resp.status == 200:
                         pattern_data = await resp.json()
@@ -282,8 +245,7 @@ async def run_trading_workflow(cycle_id: str, mode: str = "normal", params: Dict
         
         workflow_result["stages"]["patterns"] = {
             "candidates": len(pattern_candidates),
-            "with_patterns": len([c for c in pattern_candidates if c.get("patterns")]),
-            "min_confidence_used": pattern_confidence_min
+            "with_patterns": len([c for c in pattern_candidates if c.get("patterns")])
         }
         logger.info(f"[{cycle_id}] Pattern analysis: {len(pattern_candidates)} candidates remain")
         
@@ -304,12 +266,8 @@ async def run_trading_workflow(cycle_id: str, mode: str = "normal", params: Dict
                         rsi = tech_data.get("rsi", 50)
                         macd_signal = tech_data.get("macd_signal", 0)
                         
-                        # Adjust RSI thresholds based on mode
-                        rsi_lower = 30 if mode == "normal" else (35 if mode == "conservative" else 25)
-                        rsi_upper = 70 if mode == "normal" else (65 if mode == "conservative" else 75)
-                        
                         # Bullish conditions
-                        if rsi_lower < rsi < rsi_upper and macd_signal > 0:
+                        if 30 < rsi < 70 and macd_signal > 0:
                             candidate["technical_score"] = (
                                 (70 - abs(rsi - 50)) / 20 * 0.5 +  # RSI score
                                 min(macd_signal / 10, 1) * 0.5      # MACD score
@@ -333,22 +291,20 @@ async def run_trading_workflow(cycle_id: str, mode: str = "normal", params: Dict
         
         # ========== STAGE 5: Risk Validation (10 → 5) ==========
         state.status = WorkflowStatus.RISK_VALIDATION
-        logger.info(f"[{cycle_id}] Stage 5: Risk validation (risk multiplier: {risk_multiplier})...")
+        logger.info(f"[{cycle_id}] Stage 5: Risk validation...")
         
         validated_candidates = []
         for candidate in technical_candidates:
             try:
                 # Prepare position for risk validation
-                base_quantity = 100 * risk_multiplier
                 position_request = {
                     "cycle_id": cycle_id,
                     "symbol": candidate["symbol"],
                     "side": "long",
-                    "quantity": int(base_quantity),
+                    "quantity": 100,  # Base quantity
                     "entry_price": candidate.get("current_price", 100),
-                    "stop_price": candidate.get("current_price", 100) * (0.98 if mode != "aggressive" else 0.97),
-                    "target_price": candidate.get("current_price", 100) * (1.05 if mode != "aggressive" else 1.08),
-                    "mode": mode
+                    "stop_price": candidate.get("current_price", 100) * 0.98,
+                    "target_price": candidate.get("current_price", 100) * 1.05
                 }
                 
                 async with state.http_session.post(
@@ -369,8 +325,7 @@ async def run_trading_workflow(cycle_id: str, mode: str = "normal", params: Dict
         
         workflow_result["stages"]["risk"] = {
             "validated": len(validated_candidates),
-            "rejected": len(technical_candidates) - len(validated_candidates),
-            "risk_multiplier": risk_multiplier
+            "rejected": len(technical_candidates) - len(validated_candidates)
         }
         logger.info(f"[{cycle_id}] Risk validation: {len(validated_candidates)} candidates approved")
         
@@ -378,17 +333,15 @@ async def run_trading_workflow(cycle_id: str, mode: str = "normal", params: Dict
         state.status = WorkflowStatus.EXECUTING_TRADES
         logger.info(f"[{cycle_id}] Stage 6: Executing trades...")
         
-        max_trades = params.get("max_positions", config.FINAL_TRADING_CANDIDATES)
         executed_trades = []
-        for candidate in validated_candidates[:max_trades]:
+        for candidate in validated_candidates[:config.FINAL_TRADING_CANDIDATES]:
             try:
                 trade_request = {
                     "symbol": candidate["symbol"],
                     "side": "buy",
                     "quantity": candidate.get("position_size", 100),
                     "order_type": "market",
-                    "cycle_id": cycle_id,
-                    "mode": mode
+                    "cycle_id": cycle_id
                 }
                 
                 async with state.http_session.post(
@@ -420,20 +373,6 @@ async def run_trading_workflow(cycle_id: str, mode: str = "normal", params: Dict
         ).total_seconds()
         workflow_result["status"] = "success"
         
-        # Store in database if available
-        if state.db_pool:
-            try:
-                await state.db_pool.execute("""
-                    INSERT INTO trading_cycles (
-                        cycle_id, start_time, end_time, status, mode,
-                        initial_universe_size, final_candidates, trades_executed
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                """, cycle_id, workflow_result["started_at"], workflow_result["completed_at"],
-                    "success", mode, config.MAX_INITIAL_CANDIDATES, 
-                    len(validated_candidates), len(executed_trades))
-            except Exception as e:
-                logger.error(f"Failed to store cycle results: {e}")
-        
         return workflow_result
         
     except Exception as e:
@@ -455,18 +394,15 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "workflow-coordinator",
-        "version": SERVICE_VERSION,
+        "version": "1.0.0",
         "current_status": state.status,
         "last_run": state.last_run.isoformat() if state.last_run else None,
         "active_cycle": state.current_cycle
     }
 
 @app.post("/api/v1/workflow/start")
-async def start_workflow(
-    background_tasks: BackgroundTasks,
-    request: WorkflowStartRequest  # Now properly using Pydantic model
-):
-    """Start a new trading workflow cycle with specified parameters"""
+async def start_workflow(background_tasks: BackgroundTasks, mode: str = "normal"):
+    """Start a new trading workflow cycle"""
     if state.status not in [WorkflowStatus.IDLE, WorkflowStatus.COMPLETED, WorkflowStatus.FAILED]:
         raise HTTPException(
             status_code=409,
@@ -475,21 +411,14 @@ async def start_workflow(
     
     cycle_id = f"cycle_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
     
-    # Start workflow in background with parsed parameters
-    background_tasks.add_task(
-        run_trading_workflow,
-        cycle_id,
-        request.mode,
-        request.dict()  # Pass all parameters
-    )
+    # Start workflow in background
+    background_tasks.add_task(run_trading_workflow, cycle_id, mode)
     
     return {
         "success": True,
         "cycle_id": cycle_id,
         "status": "started",
-        "mode": request.mode,
-        "max_positions": request.max_positions,
-        "risk_level": request.risk_level
+        "mode": mode
     }
 
 @app.get("/api/v1/workflow/status")
@@ -498,8 +427,6 @@ async def get_workflow_status():
     return {
         "status": state.status,
         "current_cycle": state.current_cycle,
-        "current_mode": state.current_mode,
-        "current_params": state.current_params,
         "last_run": state.last_run.isoformat() if state.last_run else None,
         "active_positions": len(state.active_positions)
     }
@@ -510,34 +437,26 @@ async def stop_workflow():
     if state.status in [WorkflowStatus.IDLE, WorkflowStatus.COMPLETED, WorkflowStatus.FAILED]:
         return {"success": False, "message": "No active workflow to stop"}
     
-    old_status = state.status
     state.status = WorkflowStatus.IDLE
-    logger.info(f"Workflow stopped (was: {old_status})")
-    return {"success": True, "message": "Workflow stop requested", "previous_status": old_status}
+    return {"success": True, "message": "Workflow stop requested"}
 
 @app.get("/api/v1/workflow/history")
 async def get_workflow_history(limit: int = 10):
     """Get workflow run history"""
     if not state.db_pool:
-        # Return empty history if no database
-        return {"history": [], "message": "Database not configured"}
+        raise HTTPException(status_code=503, detail="Database not available")
     
-    try:
-        rows = await state.db_pool.fetch("""
-            SELECT cycle_id, start_time, end_time, status, mode,
-                   initial_universe_size, final_candidates, trades_executed
-            FROM trading_cycles
-            ORDER BY start_time DESC
-            LIMIT $1
-        """, limit)
-        
-        return {
-            "history": [dict(row) for row in rows],
-            "total_cycles": len(rows)
-        }
-    except Exception as e:
-        logger.error(f"Failed to fetch history: {e}")
-        return {"history": [], "error": str(e)}
+    rows = await state.db_pool.fetch("""
+        SELECT cycle_id, start_time, end_time, status, 
+               initial_universe_size, final_candidates
+        FROM trading_cycles
+        ORDER BY start_time DESC
+        LIMIT $1
+    """, limit)
+    
+    return {
+        "history": [dict(row) for row in rows]
+    }
 
 # ============================================================================
 # MAIN
