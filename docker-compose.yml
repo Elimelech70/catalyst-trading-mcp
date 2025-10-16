@@ -342,6 +342,32 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # ==========================================================================
+  # Workflow Service (REST - Port 5010)
+  # ==========================================================================
+
+  catalyst-workflow:
+    build: ./services/workflow
+    container_name: catalyst-workflow
+    ports:
+    - "5010:5010"
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      SCANNER_URL: http://catalyst-scanner:5001
+      PATTERN_URL: http://catalyst-pattern:5002
+      TECHNICAL_URL: http://catalyst-technical:5003
+      RISK_URL: http://catalyst-risk-manager:5004
+      TRADING_URL: http://catalyst-trading:5005
+      NEWS_URL: http://catalyst-news:5008
+    networks:
+      - catalyst-network
+    depends_on:
+      - db
+      - catalyst-scanner
+      - catalyst-pattern
+    restart: unless-stopped
+
+
 # ==========================================================================
 # NETWORKS
 # ==========================================================================
