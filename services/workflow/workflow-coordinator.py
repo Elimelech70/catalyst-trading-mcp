@@ -34,6 +34,10 @@ import os
 import json
 from dataclasses import dataclass
 
+SERVICE_NAME = "workflow"
+SERVICE_VERSION = "1.0.o"
+SERVICE_PORT = 5006
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -46,16 +50,16 @@ logger = logging.getLogger("workflow")
 # ============================================================================
 @dataclass
 class Config:
-    SERVICE_PORT = 5010  # Different from MCP orchestration (5000)
+    SERVICE_PORT = 5006 # Different from MCP orchestration (5000)
     DATABASE_URL = os.getenv("DATABASE_URL")
     
     # Service URLs (internal Docker network)
-    SCANNER_URL = os.getenv("SCANNER_URL", "http://catalyst-scanner:5001")
-    PATTERN_URL = os.getenv("PATTERN_URL", "http://catalyst-pattern:5002")
-    TECHNICAL_URL = os.getenv("TECHNICAL_URL", "http://catalyst-technical:5003")
-    RISK_URL = os.getenv("RISK_URL", "http://catalyst-risk-manager:5004")
-    TRADING_URL = os.getenv("TRADING_URL", "http://catalyst-trading:5005")
-    NEWS_URL = os.getenv("NEWS_URL", "http://catalyst-news:5008")
+    SCANNER_URL = os.getenv("SCANNER_URL", "http://scanner:5001")
+    PATTERN_URL = os.getenv("PATTERN_URL", "http://pattern:5002")
+    TECHNICAL_URL = os.getenv("TECHNICAL_URL", "http://technical:5003")
+    RISK_URL = os.getenv("RISK_URL", "http://risk-manager:5004")
+    TRADING_URL = os.getenv("TRADING_URL", "http://trading:5005")
+    NEWS_URL = os.getenv("NEWS_URL", "http://news:5008")
     
     # Workflow parameters
     MAX_INITIAL_CANDIDATES = 100

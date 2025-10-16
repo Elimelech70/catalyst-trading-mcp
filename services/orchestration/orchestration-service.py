@@ -6,9 +6,6 @@ Version: 5.1.1
 Last Updated: 2025-10-13
 Purpose: MCP orchestration with normalized schema and rigorous error handling
 
-REVISION HISTORY:
-v5.2.0 (2025-10-16) Fix MCP logic
-
 v5.1.1 (2025-10-13) - MCP URI Format Fix
 - CRITICAL FIX: Changed resource URIs to full URL format
 - Changed: "trading-cycle/current" → "catalyst://trading-cycle/current"
