@@ -16,7 +16,7 @@ v1.0.0 (2025-10-16) - Initial implementation
 Description:
 This service handles the actual trading workflow coordination,
 calling each service in sequence and filtering candidates.
-Runs on port 5010 as a standard HTTP service.
+Runs on port 5006 as a standard HTTP service.
 """
 
 from contextlib import asynccontextmanager

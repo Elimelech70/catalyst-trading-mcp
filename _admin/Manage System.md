@@ -70,7 +70,7 @@ curl http://localhost:5008/health  # News
 curl http://localhost:5009/health  # Reporting
 
 # Start a trading cycle via orchestration
-curl -X POST http://localhost:5000/api/v1/cycle/start \
+curl -X POST http://localhost:5006/api/v1/cycle/start \
   -H "Content-Type: application/json" \
   -d '{"mode": "conservative", "max_positions": 3}'
 
