@@ -1,39 +1,27 @@
 # Name of Application: Catalyst Trading System
 # Name of file: services/technical/Dockerfile
-# Version: 5.0.1
+# Version: 5.0.2
 # Last Updated: 2025-10-16
-# Purpose: Docker container for Technical Service with TA-Lib support
+# Purpose: Docker container for Technical Service using pandas-ta
 
 # REVISION HISTORY:
+# v5.0.2 (2025-10-16) - Switched to pandas-ta for better compatibility
 # v5.0.1 (2025-10-16) - Added proper TA-Lib C library installation
 # v5.0.0 (2025-10-11) - Initial version
 
 # Description of Service:
 # Technical Analysis Service providing indicators and calculations
-# using pandas for data manipulation and TA-Lib for technical analysis
+# using pandas for data manipulation and pandas-ta for technical analysis
 
 FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install build dependencies and TA-Lib C library
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
-    make \
-    wget \
     curl \
-    && cd /tmp \
-    && wget https://sourceforge.net/projects/ta-lib/files/ta-lib/0.4.0/ta-lib-0.4.0-src.tar.gz \
-    && tar -xzf ta-lib-0.4.0-src.tar.gz \
-    && cd ta-lib \
-    && ./configure --prefix=/usr \
-    && make \
-    && make install \
-    && cd / \
-    && rm -rf /tmp/ta-lib* \
-    && apt-get remove -y wget make \
-    && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
