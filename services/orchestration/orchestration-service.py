@@ -310,7 +310,7 @@ async def initialize():
         state.http_session = aiohttp.ClientSession()
         logger.info("[INIT] HTTP session created")
         
-        health = await get_system_health(None)
+        health = await _get_system_health_logic
         
         failed = health.get('failed_services', [])
         if failed:
