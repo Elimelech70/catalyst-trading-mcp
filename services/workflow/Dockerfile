@@ -31,7 +31,7 @@ RUN useradd -m -u 1000 catalyst && \
 USER catalyst
 
 # Expose service port
-EXPOSE 5010
+EXPOSE 5006
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
