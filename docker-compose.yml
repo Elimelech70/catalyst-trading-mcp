@@ -350,7 +350,7 @@ services:
     build: ./services/workflow
     container_name: catalyst-workflow
     ports:
-    - "5010:5010"
+    - "5006:5006"
     environment:
       DATABASE_URL: ${DATABASE_URL}
       SCANNER_URL: http://catalyst-scanner:5001
