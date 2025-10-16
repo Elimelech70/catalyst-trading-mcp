@@ -7,8 +7,6 @@ Last Updated: 2025-10-13
 Purpose: MCP orchestration with normalized schema and rigorous error handling
 
 REVISION HISTORY:
-v5.2.0 (2025-10-16) Fix MCP logic
-
 v5.1.1 (2025-10-13) - MCP URI Format Fix
 - CRITICAL FIX: Changed resource URIs to full URL format
 - Changed: "trading-cycle/current" → "catalyst://trading-cycle/current"
@@ -132,16 +130,15 @@ async def get_current_cycle(ctx: Context) -> Dict:
         logger.error(f"Error getting current cycle: {e}", exc_info=True, extra={'error_type': 'resource'})
         return {"error": str(e)}
 
-# Internal function containing the actual health check logic
-async def _get_system_health_logic() -> Dict:
-    """Get system health across all services (internal logic)"""
+@mcp.resource("catalyst://system/health")
+async def get_system_health(ctx: Context) -> Dict:
+    """Get system health across all services"""
     try:
         health_checks = {}
         failed_services = []
         
         for service_name, url in SERVICE_URLS.items():
             try:
-                # Call the internal helper function
                 result = await call_service(service_name, "GET", "/health")
                 health_checks[service_name] = result.get("status", "unknown")
             except Exception as e:
@@ -160,14 +157,7 @@ async def _get_system_health_logic() -> Dict:
         }
     except Exception as e:
         logger.error(f"Error checking system health: {e}", exc_info=True, extra={'error_type': 'resource'})
-        # Note: If this fails, the internal call will likely re-raise, but this handles top-level errors for the MCP resource
         return {"error": str(e)}
-
-# The MCP resource function (This is the one that gets replaced by FunctionResource)
-@mcp.resource("catalyst://system/health")
-async def get_system_health(ctx: Context) -> Dict:
-    """Get system health across all services (MCP endpoint)"""
-    return await _get_system_health_logic()
 
 @mcp.tool()
 async def start_trading_cycle(
