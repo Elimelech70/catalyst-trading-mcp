@@ -1,11 +1,12 @@
 # Name of Application: Catalyst Trading System
 # Name of file: services/technical/requirements.txt
-# Version: 5.0.0
+# Version: 5.0.2
 # Last Updated: 2025-10-16
-# Purpose: Python dependencies for Technical Service
+# Purpose: Python dependencies for Technical Service using pandas-ta
 
 # REVISION HISTORY:
-# v5.0.0 (2025-10-16) - Fixed missing pandas dependency
+# v5.0.2 (2025-10-16) - Switched from ta-lib to pandas-ta for compatibility
+# v5.0.0 (2025-10-11) - Initial version
 
 # Core
 fastapi==0.104.1
@@ -22,7 +23,7 @@ httpx==0.25.0
 # Technical Analysis
 numpy==1.24.3
 pandas==2.0.3
-ta-lib==0.4.28
+pandas-ta==0.3.14b0
 yfinance==0.2.28
 
 # Utilities
