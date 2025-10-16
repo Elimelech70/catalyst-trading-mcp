@@ -1,6 +1,8 @@
 #Basic commands
 ssh -i ~/.ssh/claude_desktop_key root@68.183.177.11
 
+ssh -i ~/.ssh/catalyst_droplet root@68.183.177.11
+
 #connect vscode to droplet
 
 
