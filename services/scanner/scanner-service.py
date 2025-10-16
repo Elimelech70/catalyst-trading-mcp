@@ -536,7 +536,7 @@ async def persist_scan_results(cycle_id: int, picks: List[Dict]) -> bool:
                 await state.db_pool.execute("""
                     INSERT INTO scan_results (
                         cycle_id, security_id, time_id, rank,
-                        catalyst_score, technical_score, combined_score,
+                        catalyst_score, technical_score, composite_score,
                         current_price, avg_volume_5d, price_change_5d,
                         news_count_24h, pattern_signals, scan_timestamp
                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
@@ -633,7 +633,7 @@ async def get_candidates(cycle_id: Optional[int] = None, limit: int = 10):
                     sec.sector_name,
                     sr.catalyst_score,
                     sr.technical_score,
-                    sr.combined_score,
+                    sr.composite_score,
                     sr.current_price,
                     sr.avg_volume_5d,
                     sr.price_change_5d,
@@ -656,7 +656,7 @@ async def get_candidates(cycle_id: Optional[int] = None, limit: int = 10):
                     sec.sector_name,
                     sr.catalyst_score,
                     sr.technical_score,
-                    sr.combined_score,
+                    sr.composite_score,
                     sr.current_price,
                     sr.avg_volume_5d,
                     sr.price_change_5d,
