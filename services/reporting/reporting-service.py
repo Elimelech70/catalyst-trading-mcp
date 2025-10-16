@@ -2,11 +2,12 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: reporting-service.py
-Version: 5.1.0
+Version: 5.1.1
 Last Updated: 2025-10-13
 Purpose: Reporting and analytics with normalized schema v5.0 and rigorous error handling
 
 REVISION HISTORY:
+v5.1.1 (2025-10-16) - Fix DATABASE_URL only Digital Ocean
 v5.1.0 (2025-10-13) - Production Error Handling Upgrade
 - NO Unicode emojis (ASCII only)
 - Specific exception types (ValueError, asyncpg.PostgresError)
@@ -43,7 +44,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(SERVICE_NAME)
 
 class Config:
-    DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://catalyst:catalyst@localhost:5432/catalyst_trading")
+    DATABASE_URL = os.getenv("DATABASE_URL")
+    if not DATABASE_URL:
+        raise ValueError("DATABASE_URL environment variable required")
     POOL_MIN_SIZE = 2
     POOL_MAX_SIZE = 10
 

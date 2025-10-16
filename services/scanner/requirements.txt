@@ -1,6 +1,4 @@
 # MCP/FastMCP
-fastmcp>=0.10.0
-asyncio-mqtt>=0.13.0
 
 # Web framework
 fastapi>=0.115.12
@@ -18,7 +16,7 @@ aioredis>=2.0.1
 aiohttp>=3.9.1
 httpx>=0.28.1
 requests>=2.31.0
-websockets>=09.0,<13.0
+websockets>=9.0,<13.0
 
 # Trading APIs
 alpaca-py>=0.21.0

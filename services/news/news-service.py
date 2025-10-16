@@ -2,11 +2,12 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: news-service.py
-Version: 5.3.1
+Version: 5.3.2
 Last Updated: 2025-10-13
 Purpose: News catalyst detection with normalized schema v5.0 and rigorous error handling
 
 REVISION HISTORY:
+v5.3.2 (2025-10-16) - Fix DATABASE_URL
 v5.3.1 (2025-10-13) - SQL Syntax Fix
 - CRITICAL FIX: Fixed interval arithmetic in price impact calculation
 - Changed: td.timestamp >= $2 + INTERVAL '5 minutes'
@@ -112,7 +113,9 @@ logger.addHandler(console_handler)
 # ============================================================================
 class Config:
     """Service configuration"""
-    DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://catalyst:catalyst@localhost:5432/catalyst_trading")
+    DATABASE_URL = os.getenv("DATABASE_URL")
+    if not DATABASE_URL:
+        raise ValueError("DATABASE_URL environment variable required")
     POOL_MIN_SIZE = 2
     POOL_MAX_SIZE = 10
     
