@@ -54,23 +54,28 @@ docker logs catalyst-orchestration --tail 20
 docker logs catalyst-news --tail 20
 
 
-#----------------------------------------------------------
-## build
-When You MUST Build:
-✅ Required when:
+## Testing System
 
-First time setup
-Code changes in scanner-service.py
-Dockerfile changes
-requirements.txt changes
-New dependencies added
+# Check if services are up
+docker-compose ps
 
-❌ NOT needed when:
+# Or check individual service health
+curl http://localhost:5000/health  # Orchestration
+curl http://localhost:5001/health  # Scanner
+curl http://localhost:5002/health  # Pattern
+curl http://localhost:5003/health  # Technical
+curl http://localhost:5004/health  # Risk Manager
+curl http://localhost:5005/health  # Trading
+curl http://localhost:5008/health  # News
+curl http://localhost:5009/health  # Reporting
 
-Just changing environment variables
-Restarting existing containers
-Only config/docker-compose.yml changes
+# Start a trading cycle via orchestration
+curl -X POST http://localhost:5000/api/v1/cycle/start \
+  -H "Content-Type: application/json" \
+  -d '{"mode": "conservative", "max_positions": 3}'
 
+# Check cycle status
+curl http://localhost:5000/api/v1/cycle/current
 
 
 ## Restart website
