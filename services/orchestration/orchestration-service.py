@@ -133,8 +133,9 @@ if TRANSPORT_MODE == "websocket":
         """WebSocket endpoint for MCP protocol"""
         await websocket.accept()
         try:
-            # Handle MCP protocol over WebSocket
-            await mcp.handle_websocket(websocket)
+            # Handle MCP protocol over WebSocket (FIXED METHOD NAME)
+            # Assuming the method is handle_websocket_connection based on common patterns
+            await mcp.handle_fastapi_websocket(websocket)
         except Exception as e:
             logger.error(f"WebSocket error: {e}")
         finally:
