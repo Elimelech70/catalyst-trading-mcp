@@ -2,16 +2,9 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: orchestration-service.py
-Version: 5.2.0
-Last Updated: 2025-10-17
-Purpose: MCP orchestration with WebSocket support for containerized deployment
-
-REVISION HISTORY:
-v5.2.0 (2025-10-17) - WebSocket Transport Support
-- Added dynamic transport selection based on environment
-- Fixed STDIO issue in Docker containers
-- Added WebSocket server on port 5000
-- Maintains backward compatibility with STDIO for local development
+Version: 5.1.1
+Last Updated: 2025-10-13
+Purpose: MCP orchestration with normalized schema and rigorous error handling
 
 v5.1.1 (2025-10-13) - MCP URI Format Fix
 - CRITICAL FIX: Changed resource URIs to full URL format
@@ -24,7 +17,6 @@ v5.0.0 (2025-10-06) - Normalized schema awareness
 Description of Service:
 MCP server orchestrating all trading services with proper error handling.
 Coordinates between normalized services using security_id.
-Now supports both STDIO (for local dev) and WebSocket (for Docker/production).
 """
 
 from fastmcp import FastMCP, Context
@@ -38,15 +30,10 @@ import json
 import os
 import logging
 import signal
-import sys
-import uvicorn
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
 SERVICE_NAME = "orchestration"
-SERVICE_VERSION = "5.2.0"
-SERVICE_PORT = int(os.getenv("SERVICE_PORT", "5000"))
-TRANSPORT_MODE = os.getenv("MCP_TRANSPORT", "websocket").lower()  # Default to websocket for Docker
+SERVICE_VERSION = "5.1.1"
+SERVICE_PORT = 5000
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(SERVICE_NAME)
@@ -87,58 +74,7 @@ class ServiceState:
 
 state = ServiceState()
 
-# Initialize FastMCP with server name
 mcp = FastMCP("catalyst-orchestration")
-
-# Create FastAPI app for WebSocket mode
-app = FastAPI(title="Catalyst Orchestration Service", version=SERVICE_VERSION)
-
-# Add CORS middleware for web-based clients
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Health endpoint for Docker health checks
-@app.get("/health")
-async def health_check():
-    """Health check endpoint for Docker"""
-    try:
-        # Check if we can reach at least one service
-        health = await _get_system_health_logic()
-        failed_services = health.get('failed_services', [])
-        
-        if len(failed_services) == len(SERVICE_URLS):
-            return {"status": "unhealthy", "message": "All services unreachable"}
-        
-        return {
-            "status": "healthy",
-            "version": SERVICE_VERSION,
-            "transport": TRANSPORT_MODE,
-            "failed_services": failed_services
-        }
-    except Exception as e:
-        logger.error(f"Health check failed: {e}")
-        return {"status": "unhealthy", "error": str(e)}
-
-# WebSocket endpoint for MCP when in WebSocket mode
-if TRANSPORT_MODE == "websocket":
-    from fastapi import WebSocket
-    
-    @app.websocket("/mcp")
-    async def websocket_endpoint(websocket: WebSocket):
-        """WebSocket endpoint for MCP protocol"""
-        await websocket.accept()
-        try:
-            # Handle MCP protocol over WebSocket
-            await mcp.handle_websocket(websocket)
-        except Exception as e:
-            logger.error(f"WebSocket error: {e}")
-        finally:
-            await websocket.close()
 
 async def call_service(service: str, method: str, endpoint: str, data: Optional[Dict] = None) -> Dict:
     """Call internal service with proper error handling"""
@@ -221,9 +157,10 @@ async def _get_system_health_logic() -> Dict:
         }
     except Exception as e:
         logger.error(f"Error checking system health: {e}", exc_info=True, extra={'error_type': 'resource'})
+        # Note: If this fails, the internal call will likely re-raise, but this handles top-level errors for the MCP resource
         return {"error": str(e)}
 
-# The MCP resource function
+# The MCP resource function (This is the one that gets replaced by FunctionResource)
 @mcp.resource("catalyst://system/health")
 async def get_system_health(ctx: Context) -> Dict:
     """Get system health across all services (MCP endpoint)"""
@@ -365,7 +302,6 @@ async def analyze_symbol(symbol: str) -> Dict:
 async def initialize():
     """Initialize orchestration service"""
     logger.info(f"[INIT] Orchestration Service v{SERVICE_VERSION}")
-    logger.info(f"[INIT] Transport mode: {TRANSPORT_MODE}")
     
     try:
         state.http_session = aiohttp.ClientSession()
@@ -398,47 +334,20 @@ async def cleanup():
     except Exception as e:
         logger.error(f"[CLEANUP] Cleanup error: {e}", exc_info=True, extra={'error_type': 'cleanup'})
 
-async def run_websocket_server():
-    """Run the WebSocket/HTTP server using uvicorn"""
-    logger.info(f"Starting WebSocket server on port {SERVICE_PORT}")
-    
-    config = uvicorn.Config(
-        app=app,
-        host="0.0.0.0",
-        port=SERVICE_PORT,
-        log_level="info",
-        access_log=False
-    )
-    server = uvicorn.Server(config)
-    
-    # Initialize before starting server
-    await initialize()
-    
-    try:
-        await server.serve()
-    finally:
-        await cleanup()
-
 if __name__ == "__main__":
     logger.info("Starting Catalyst Trading MCP Orchestration Service...")
     logger.info(f"Version: {SERVICE_VERSION}")
     
-    if TRANSPORT_MODE == "websocket":
-        logger.info("Running in WebSocket mode (for Docker/production)")
-        # Run as WebSocket server
-        asyncio.run(run_websocket_server())
-    else:
-        logger.info("Running in STDIO mode (for local development)")
-        # Run initialization
-        asyncio.run(initialize())
-        
-        # Setup signal handlers for cleanup
-        def signal_handler(sig, frame):
-            asyncio.run(cleanup())
-            sys.exit(0)
-        
-        signal.signal(signal.SIGINT, signal_handler)
-        signal.signal(signal.SIGTERM, signal_handler)
-        
-        # Run MCP server with STDIO
-        mcp.run(transport='stdio')
+    # Run initialization
+    asyncio.run(initialize())
+    
+    # Setup signal handlers for cleanup
+    def signal_handler(sig, frame):
+        asyncio.run(cleanup())
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    # Run MCP server
+    mcp.run(transport='stdio')
