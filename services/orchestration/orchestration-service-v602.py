@@ -2,17 +2,11 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: orchestration-service.py
-Version: 6.0.3
+Version: 6.0.2
 Last Updated: 2025-10-18
 Purpose: Best-practice MCP orchestration using HTTP transport
 
 REVISION HISTORY:
-v6.0.3 (2025-10-18) - Fixed resource calling issue
-- Separated internal health check from MCP resource
-- Created _get_system_health_internal() for internal use
-- MCP resources cannot be called directly as functions
-- Fixed initialization health check
-
 v6.0.2 (2025-10-18) - Fixed initialization hooks
 - Removed @mcp.on_initialize() and @mcp.on_cleanup() decorators
 - FastMCP doesn't support these decorators
@@ -69,7 +63,7 @@ import logging
 # ============================================================================
 
 SERVICE_NAME = "orchestration"
-SERVICE_VERSION = "6.0.3"
+SERVICE_VERSION = "6.0.2"
 SERVICE_PORT = int(os.getenv("SERVICE_PORT", "5000"))
 
 logging.basicConfig(
@@ -229,40 +223,6 @@ async def health_check(request: Request) -> PlainTextResponse:
 # MCP RESOURCES - System State
 # ============================================================================
 
-async def _get_system_health_internal() -> Dict:
-    """
-    Internal function to check system health (not exposed as MCP resource)
-    
-    Returns:
-        Dictionary with health status
-    """
-    health_results = {}
-    failed_services = []
-    
-    # Check each service health
-    for service_name, service_url in SERVICE_URLS.items():
-        try:
-            async with state.http_session.get(
-                f"{service_url}/health",
-                timeout=aiohttp.ClientTimeout(total=5)
-            ) as resp:
-                if resp.status == 200:
-                    health_results[service_name] = "healthy"
-                else:
-                    health_results[service_name] = "unhealthy"
-                    failed_services.append(service_name)
-        except Exception as e:
-            health_results[service_name] = f"error: {str(e)}"
-            failed_services.append(service_name)
-    
-    return {
-        "status": "healthy" if not failed_services else "degraded",
-        "timestamp": datetime.now().isoformat(),
-        "services": health_results,
-        "failed_services": failed_services
-    }
-
-
 @mcp.resource("catalyst://system/health")
 async def get_system_health(ctx: Context) -> str:
     """
@@ -272,7 +232,31 @@ async def get_system_health(ctx: Context) -> str:
         JSON string with system health metrics
     """
     try:
-        return await _get_system_health_internal()
+        health_results = {}
+        failed_services = []
+        
+        # Check each service health
+        for service_name, service_url in SERVICE_URLS.items():
+            try:
+                async with state.http_session.get(
+                    f"{service_url}/health",
+                    timeout=aiohttp.ClientTimeout(total=5)
+                ) as resp:
+                    if resp.status == 200:
+                        health_results[service_name] = "healthy"
+                    else:
+                        health_results[service_name] = "unhealthy"
+                        failed_services.append(service_name)
+            except Exception as e:
+                health_results[service_name] = f"error: {str(e)}"
+                failed_services.append(service_name)
+        
+        return {
+            "status": "healthy" if not failed_services else "degraded",
+            "timestamp": datetime.now().isoformat(),
+            "services": health_results,
+            "failed_services": failed_services
+        }
         
     except Exception as e:
         logger.error(f"System health check failed: {e}")
@@ -658,7 +642,7 @@ async def initialize():
         
         # Health check all services
         logger.info("[INIT] Checking service health...")
-        health = await _get_system_health_internal()
+        health = await get_system_health(None)
         
         failed = health.get('failed_services', [])
         if failed:
