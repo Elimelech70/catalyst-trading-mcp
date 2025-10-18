@@ -2,16 +2,11 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: orchestration-service.py
-Version: 6.0.1
+Version: 6.0.0
 Last Updated: 2025-10-18
 Purpose: Best-practice MCP orchestration using HTTP transport
 
 REVISION HISTORY:
-v6.0.1 (2025-10-18) - Fixed URI format
-- Changed resource URIs to full URL format (catalyst://path)
-- FastMCP requires URI scheme, not just path strings
-- Example: "system/health" → "catalyst://system/health"
-
 v6.0.0 (2025-10-18) - Best Practice Implementation
 - Pure FastMCP HTTP transport (no WebSocket)
 - Removed FastAPI mixing - pure FastMCP server
@@ -57,7 +52,7 @@ import logging
 # ============================================================================
 
 SERVICE_NAME = "orchestration"
-SERVICE_VERSION = "6.0.1"
+SERVICE_VERSION = "6.0.0"
 SERVICE_PORT = int(os.getenv("SERVICE_PORT", "5000"))
 
 logging.basicConfig(
@@ -217,7 +212,7 @@ async def health_check(request: Request) -> PlainTextResponse:
 # MCP RESOURCES - System State
 # ============================================================================
 
-@mcp.resource("catalyst://system/health")
+@mcp.resource("system/health")
 async def get_system_health(ctx: Context) -> str:
     """
     Get overall system health status
@@ -257,7 +252,7 @@ async def get_system_health(ctx: Context) -> str:
         raise McpError("HEALTH_CHECK_FAILED", str(e))
 
 
-@mcp.resource("catalyst://trading-cycle/current")
+@mcp.resource("trading-cycle/current")
 async def get_current_cycle(ctx: Context) -> str:
     """
     Get current trading cycle information
@@ -286,7 +281,7 @@ async def get_current_cycle(ctx: Context) -> str:
     }
 
 
-@mcp.resource("catalyst://market-scan/latest")
+@mcp.resource("market-scan/latest")
 async def get_latest_scan(ctx: Context) -> str:
     """
     Get latest market scan results
@@ -302,7 +297,7 @@ async def get_latest_scan(ctx: Context) -> str:
         raise McpError("SCAN_RETRIEVAL_FAILED", str(e))
 
 
-@mcp.resource("catalyst://portfolio/positions/open")
+@mcp.resource("portfolio/positions/open")
 async def get_open_positions(ctx: Context) -> str:
     """
     Get currently open trading positions
@@ -318,7 +313,7 @@ async def get_open_positions(ctx: Context) -> str:
         raise McpError("POSITION_RETRIEVAL_FAILED", str(e))
 
 
-@mcp.resource("catalyst://analytics/daily-summary")
+@mcp.resource("analytics/daily-summary")
 async def get_daily_summary(ctx: Context) -> str:
     """
     Get today's trading performance summary
