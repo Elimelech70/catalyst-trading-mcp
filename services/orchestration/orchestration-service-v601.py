@@ -2,17 +2,11 @@
 """
 Name of Application: Catalyst Trading System
 Name of file: orchestration-service.py
-Version: 6.0.2
+Version: 6.0.1
 Last Updated: 2025-10-18
 Purpose: Best-practice MCP orchestration using HTTP transport
 
 REVISION HISTORY:
-v6.0.2 (2025-10-18) - Fixed initialization hooks
-- Removed @mcp.on_initialize() and @mcp.on_cleanup() decorators
-- FastMCP doesn't support these decorators
-- Moved to manual initialization before mcp.run()
-- Added proper cleanup in finally block
-
 v6.0.1 (2025-10-18) - Fixed URI format
 - Changed resource URIs to full URL format (catalyst://path)
 - FastMCP requires URI scheme, not just path strings
@@ -63,7 +57,7 @@ import logging
 # ============================================================================
 
 SERVICE_NAME = "orchestration"
-SERVICE_VERSION = "6.0.2"
+SERVICE_VERSION = "6.0.1"
 SERVICE_PORT = int(os.getenv("SERVICE_PORT", "5000"))
 
 logging.basicConfig(
@@ -631,8 +625,9 @@ async def get_risk_metrics(ctx: Context) -> Dict:
 # INITIALIZATION AND CLEANUP
 # ============================================================================
 
+@mcp.on_initialize()
 async def initialize():
-    """Initialize orchestration service on startup"""
+    """Initialize orchestration service"""
     logger.info(f"[INIT] Catalyst Orchestration Service v{SERVICE_VERSION}")
     
     try:
@@ -663,8 +658,9 @@ async def initialize():
         )
 
 
+@mcp.on_cleanup()
 async def cleanup():
-    """Cleanup orchestration service on shutdown"""
+    """Cleanup orchestration service"""
     logger.info("[CLEANUP] Shutting down orchestration")
     
     try:
@@ -700,23 +696,15 @@ if __name__ == "__main__":
     logger.info(f"Services: {len(SERVICE_URLS)}")
     logger.info("=" * 60)
     
-    # Initialize before starting server
-    import asyncio
-    asyncio.run(initialize())
-    
-    try:
-        # Run FastMCP server with HTTP transport
-        # This is the recommended transport for production deployments
-        # Should be placed behind Nginx reverse proxy with SSL
-        mcp.run(
-            transport="http",
-            host="0.0.0.0",
-            port=SERVICE_PORT,
-            path="/mcp"
-        )
-    finally:
-        # Cleanup on exit
-        asyncio.run(cleanup())
+    # Run FastMCP server with HTTP transport
+    # This is the recommended transport for production deployments
+    # Should be placed behind Nginx reverse proxy with SSL
+    mcp.run(
+        transport="http",
+        host="0.0.0.0",
+        port=SERVICE_PORT,
+        path="/mcp"
+    )
     
     # For local development with Claude Desktop on same machine:
     # mcp.run(transport="stdio")
