@@ -132,10 +132,7 @@ backup_database() {
         source /root/catalyst-trading-mcp/.env
 
         # Use pg_dump with connection string
-        if PGPASSWORD="${DATABASE_PASSWORD:-}" pg_dump -h "${DATABASE_HOST:-}" \
-            -U "${DATABASE_USER:-}" \
-            -d "${DATABASE_NAME:-catalyst_trading}" \
-            -f "$backup_file" 2>/dev/null; then
+        if pg_dump "$DATABASE_URL" -f "$backup_file" 2>/dev/null; then
 
             print_success "Database backup created: $backup_file"
 
