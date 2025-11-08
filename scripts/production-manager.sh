@@ -1,263 +1,215 @@
-################################################################################
-# scripts/production-manager.sh
-# Save this to docker/scripts/manage.sh and chmod +x
-################################################################################
-# scripts/production-manager.sh
+#!/bin/bash
+# Catalyst Trading System - Production Manager
+# Handles market hours automation, health checks, and maintenance
 
-set -e
+set -euo pipefail
+
+# Configuration
+COMPOSE_FILE="/root/catalyst-trading-mcp/docker-compose.yml"
+LOG_DIR="/var/log/catalyst"
+BACKUP_DIR="/backups/catalyst"
+ALERT_EMAIL="${ALERT_EMAIL:-}"
 
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
 NC='\033[0m'
 
-COMPOSE_FILE="docker-compose.yml"
-BACKUP_DIR="./backups"
-LOG_DIR="./logs"
-
-# Create necessary directories
-mkdir -p "$BACKUP_DIR" "$LOG_DIR"
-
-print_status() {
-    echo -e "${BLUE}[$(date '+%Y-%m-%d %H:%M:%S')] $1${NC}"
+# Logging function
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_DIR/production-manager.log"
 }
 
 print_success() {
-    echo -e "${GREEN}[$(date '+%Y-%m-%d %H:%M:%S')] ✓ $1${NC}"
-}
-
-print_warning() {
-    echo -e "${YELLOW}[$(date '+%Y-%m-%d %H:%M:%S')] ⚠ $1${NC}"
+    echo -e "${GREEN}✓${NC} $1"
+    log "SUCCESS: $1"
 }
 
 print_error() {
-    echo -e "${RED}[$(date '+%Y-%m-%d %H:%M:%S')] ✗ $1${NC}"
+    echo -e "${RED}✗${NC} $1"
+    log "ERROR: $1"
 }
 
-# Check if market is open
-is_market_open() {
-    local current_time=$(date +%H%M)
-    local current_day=$(date +%u)  # 1=Monday, 7=Sunday
+print_status() {
+    echo -e "${YELLOW}→${NC} $1"
+    log "STATUS: $1"
+}
 
-    # Monday-Friday, 9:30 AM - 4:00 PM EST
-    if [[ $current_day -ge 1 && $current_day -le 5 ]]; then
-        if [[ $current_time -ge 0930 && $current_time -le 1600 ]]; then
-            return 0  # Market is open
-        fi
+# Check if we're in market hours (EST)
+is_market_hours() {
+    hour=$(TZ='America/New_York' date +%H)
+    day=$(TZ='America/New_York' date +%u)  # 1=Monday, 7=Sunday
+
+    # Monday-Friday (1-5), 9:30 AM - 4:00 PM EST
+    if [ "$day" -le 5 ] && [ "$hour" -ge 9 ] && [ "$hour" -lt 16 ]; then
+        return 0  # True
+    else
+        return 1  # False
     fi
-    return 1  # Market is closed
 }
 
-# Market hours aware startup
+# Start all services
 start_system() {
     print_status "Starting Catalyst Trading System..."
 
-    # Load environment
-    if [[ -f .env ]]; then
-        source .env
-    else
-        print_error ".env file not found!"
-        exit 1
-    fi
+    cd /root/catalyst-trading-mcp || exit 1
 
-    # Check if already running
-    if docker-compose -f $COMPOSE_FILE ps | grep -q "Up"; then
-        print_warning "System appears to be already running"
+    # Start services
+    docker-compose -f "$COMPOSE_FILE" up -d
+
+    # Wait for services to be healthy
+    sleep 30
+
+    # Check health
+    if curl -sf http://localhost:5000/health >/dev/null 2>&1; then
+        print_success "All services started successfully"
+    else
+        print_error "Service health check failed"
         return 1
     fi
-
-    # Start infrastructure first
-    print_status "Starting infrastructure services..."
-    docker-compose -f $COMPOSE_FILE up -d postgres redis
-
-    # Wait for infrastructure to be healthy
-    print_status "Waiting for infrastructure to be ready..."
-    local retries=0
-    while [[ $retries -lt 30 ]]; do
-        if docker-compose -f $COMPOSE_FILE ps postgres | grep -q "healthy" && \
-           docker-compose -f $COMPOSE_FILE ps redis | grep -q "healthy"; then
-            break
-        fi
-        sleep 2
-        ((retries++))
-    done
-
-    if [[ $retries -eq 30 ]]; then
-        print_error "Infrastructure failed to start properly"
-        return 1
-    fi
-
-    # Start core services in order
-    print_status "Starting core services..."
-    docker-compose -f $COMPOSE_FILE up -d orchestration news
-    sleep 10
-
-    docker-compose -f $COMPOSE_FILE up -d scanner pattern technical
-    sleep 10
-
-    docker-compose -f $COMPOSE_FILE up -d trading reporting
-    sleep 10
-
-    # Start monitoring
-    docker-compose -f $COMPOSE_FILE up -d system-monitor
-
-    print_success "All services started successfully"
-
-    # Market hours message
-    if is_market_open; then
-        print_status "🟢 Market is OPEN - System ready for trading"
-    else
-        print_status "🔴 Market is CLOSED - System in monitoring mode"
-    fi
-
-    # Show status
-    sleep 5
-    status_check
 }
 
-# Graceful shutdown
+# Stop all services gracefully
 stop_system() {
     print_status "Stopping Catalyst Trading System..."
 
-    # Stop in reverse order
-    docker-compose -f $COMPOSE_FILE stop system-monitor
-    docker-compose -f $COMPOSE_FILE stop reporting trading
-    docker-compose -f $COMPOSE_FILE stop technical pattern scanner
-    docker-compose -f $COMPOSE_FILE stop news orchestration
-    docker-compose -f $COMPOSE_FILE stop redis postgres
+    cd /root/catalyst-trading-mcp || exit 1
 
-    print_success "System stopped gracefully"
+    docker-compose -f "$COMPOSE_FILE" down
+
+    print_success "System stopped"
 }
 
-# Health check
+# Service health check
 status_check() {
-    print_status "System Health Check"
-    echo "=================================================="
+    print_status "Checking service health..."
 
-    # Check each service
-    services=("postgres" "redis" "orchestration" "news" "scanner" "pattern" "technical" "trading" "reporting")
+    services=(
+        "orchestration:5000"
+        "workflow:5006"
+        "scanner:5001"
+        "pattern:5002"
+        "technical:5003"
+        "risk-manager:5004"
+        "trading:5005"
+        "news:5008"
+        "reporting:5009"
+    )
+
+    failed=0
 
     for service in "${services[@]}"; do
-        status=$(docker-compose -f $COMPOSE_FILE ps $service 2>/dev/null | tail -n +3 | awk '{print $4}')
-        if [[ "$status" == *"Up"* ]]; then
-            if [[ "$status" == *"healthy"* ]]; then
-                echo -e "$service: ${GREEN}Healthy${NC}"
-            else
-                echo -e "$service: ${YELLOW}Running (health check pending)${NC}"
-            fi
+        name="${service%%:*}"
+        port="${service##*:}"
+
+        if curl -sf "http://localhost:$port/health" >/dev/null 2>&1; then
+            print_success "$name service healthy"
         else
-            echo -e "$service: ${RED}Down${NC}"
+            print_error "$name service unhealthy"
+            failed=$((failed + 1))
         fi
     done
 
-    echo "=================================================="
-
-    # Test orchestration service if running
-    if curl -s http://localhost:5000/health >/dev/null 2>&1; then
-        print_success "MCP orchestration service responding"
+    if [ $failed -eq 0 ]; then
+        print_success "All services healthy"
+        return 0
     else
-        print_error "MCP orchestration service not responding"
-    fi
-
-    # Database connectivity
-    if docker-compose -f $COMPOSE_FILE exec -T postgres pg_isready -U catalyst_user -d catalyst_trading >/dev/null 2>&1; then
-        print_success "Database connectivity verified"
-    else
-        print_error "Database connectivity failed"
-    fi
-}
-
-# Backup database
-backup_database() {
-    print_status "Creating database backup..."
-
-    local backup_file="$BACKUP_DIR/catalyst_backup_$(date +%Y%m%d_%H%M%S).sql"
-
-    docker-compose -f $COMPOSE_FILE exec -T postgres pg_dump \
-        -U catalyst_user \
-        -d catalyst_trading \
-        --clean \
-        --if-exists \
-        > "$backup_file"
-
-    if [[ $? -eq 0 ]]; then
-        print_success "Database backup created: $backup_file"
-
-        # Compress backup
-        gzip "$backup_file"
-        print_success "Backup compressed: ${backup_file}.gz"
-
-        # Clean old backups (keep last 7 days)
-        find "$BACKUP_DIR" -name "*.sql.gz" -mtime +7 -delete
-    else
-        print_error "Database backup failed"
+        print_error "$failed services unhealthy"
         return 1
     fi
 }
 
-# Market hours automation
-schedule_market_operations() {
-    print_status "Setting up market hours automation..."
+# Database backup
+backup_database() {
+    print_status "Creating database backup..."
 
-    # Create cron jobs for market operations
-    cat > /tmp/catalyst_cron << EOF
-# Catalyst Trading System Market Hours Automation
+    backup_file="$BACKUP_DIR/catalyst_backup_$(date +%Y%m%d_%H%M%S).sql"
 
-# Pre-market startup (4:00 AM EST)
-0 4 * * 1-5 /path/to/catalyst/scripts/production-manager.sh start
+    # Extract database URL components
+    # Format: postgresql://user:pass@host:port/dbname
+    if [ -f /root/catalyst-trading-mcp/.env ]; then
+        source /root/catalyst-trading-mcp/.env
 
-# Market open notification (9:30 AM EST)
-30 9 * * 1-5 /path/to/catalyst/scripts/production-manager.sh notify_market_open
+        # Use pg_dump with connection string
+        if PGPASSWORD="${DATABASE_PASSWORD:-}" pg_dump -h "${DATABASE_HOST:-}" \
+            -U "${DATABASE_USER:-}" \
+            -d "${DATABASE_NAME:-catalyst_trading}" \
+            -f "$backup_file" 2>/dev/null; then
 
-# Market close operations (4:00 PM EST)
-0 16 * * 1-5 /path/to/catalyst/scripts/production-manager.sh market_close
+            print_success "Database backup created: $backup_file"
 
-# After-hours shutdown (8:00 PM EST)
-0 20 * * 1-5 /path/to/catalyst/scripts/production-manager.sh stop
+            # Compress backup
+            gzip "$backup_file"
+            print_success "Backup compressed: ${backup_file}.gz"
 
-# Weekend maintenance (Sunday 2:00 AM)
-0 2 * * 0 /path/to/catalyst/scripts/production-manager.sh weekly_maintenance
+            # Clean old backups (keep last 30 days)
+            find "$BACKUP_DIR" -name "*.sql.gz" -mtime +30 -delete
 
-# Daily backup (11:00 PM)
-0 23 * * * /path/to/catalyst/scripts/production-manager.sh backup_database
-
-# Health check every 15 minutes during market hours
-*/15 9-16 * * 1-5 /path/to/catalyst/scripts/production-manager.sh quick_health_check
-EOF
-
-    # Install cron jobs
-    crontab /tmp/catalyst_cron
-    rm /tmp/catalyst_cron
-
-    print_success "Market hours automation configured"
+            return 0
+        else
+            print_error "Database backup failed"
+            return 1
+        fi
+    else
+        print_error ".env file not found"
+        return 1
+    fi
 }
 
 # Quick health check for cron
 quick_health_check() {
-    if ! curl -s http://localhost:5000/health >/dev/null 2>&1; then
+    if ! curl -sf http://localhost:5000/health >/dev/null 2>&1; then
         print_error "Health check failed - attempting restart"
-        docker-compose -f $COMPOSE_FILE restart orchestration
 
-        # Send alert
-        if [[ -n "$ALERT_EMAIL" ]]; then
-            echo "Catalyst Trading System health check failed at $(date)" | \
-                mail -s "ALERT: Trading System Issue" "$ALERT_EMAIL"
+        # Log to separate alert file
+        echo "[$(date)] ALERT: Health check failed, restarting system" >> "$LOG_DIR/alerts.log"
+
+        # Attempt restart
+        docker-compose -f "$COMPOSE_FILE" restart
+
+        # Wait and recheck
+        sleep 30
+
+        if curl -sf http://localhost:5000/health >/dev/null 2>&1; then
+            print_success "System recovered after restart"
+        else
+            print_error "System still unhealthy after restart"
+
+            # Send email alert if configured
+            if [ -n "$ALERT_EMAIL" ]; then
+                echo "Catalyst Trading System health check failed at $(date). Manual intervention required." | \
+                    mail -s "CRITICAL: Catalyst System Down" "$ALERT_EMAIL"
+            fi
         fi
     fi
 }
 
-# Market notifications
-notify_market_open() {
-    print_success "🟢 MARKET OPEN - Trading system active"
-    # Send notification to Claude Desktop or other monitoring
+# Market open notification
+market_open_workflow() {
+    print_status "Market open - Starting trading workflow..."
+
+    # Trigger workflow via REST API
+    response=$(curl -sf -X POST http://localhost:5006/api/v1/workflow/start \
+        -H "Content-Type: application/json" \
+        -d '{"mode": "normal", "max_positions": 5, "risk_per_trade": 0.01}')
+
+    if [ $? -eq 0 ]; then
+        print_success "Trading workflow started"
+        log "Workflow response: $response"
+    else
+        print_error "Failed to start trading workflow"
+    fi
 }
 
-market_close() {
-    print_status "🔴 MARKET CLOSED - Generating end-of-day reports"
-    # Trigger end-of-day reporting via orchestration service
-    curl -s -X POST http://localhost:5000/generate_daily_report || true
+# Market close operations
+market_close_workflow() {
+    print_status "Market close - Running end-of-day operations..."
+
+    # Trigger end-of-day report
+    curl -sf -X POST http://localhost:5009/api/v1/reports/daily >/dev/null 2>&1 || true
+
+    print_success "End-of-day operations complete"
 }
 
 # Weekly maintenance
@@ -267,13 +219,14 @@ weekly_maintenance() {
     # Backup database
     backup_database
 
-    # Clean logs older than 30 days
+    # Clean old logs (keep 30 days)
     find "$LOG_DIR" -name "*.log" -mtime +30 -delete
 
-    # Docker system cleanup
+    # Docker cleanup
     docker system prune -f
 
-    # Restart system for fresh start
+    # Restart services for fresh start
+    print_status "Restarting services..."
     stop_system
     sleep 30
     start_system
@@ -281,8 +234,21 @@ weekly_maintenance() {
     print_success "Weekly maintenance completed"
 }
 
+# Log rotation
+rotate_logs() {
+    print_status "Rotating logs..."
+
+    # Find logs larger than 100MB
+    find "$LOG_DIR" -name "*.log" -size +100M -exec gzip {} \;
+
+    # Archive old compressed logs
+    find "$LOG_DIR" -name "*.log.gz" -mtime +7 -exec mv {} "$LOG_DIR/archive/" \; 2>/dev/null || true
+
+    print_success "Log rotation complete"
+}
+
 # Main command handler
-case "$1" in
+case "${1:-}" in
     start)
         start_system
         ;;
@@ -300,35 +266,37 @@ case "$1" in
     backup)
         backup_database
         ;;
-    schedule)
-        schedule_market_operations
-        ;;
-    quick_health_check)
+    health)
         quick_health_check
         ;;
-    notify_market_open)
-        notify_market_open
+    market-open)
+        market_open_workflow
         ;;
-    market_close)
-        market_close
+    market-close)
+        market_close_workflow
         ;;
-    weekly_maintenance)
+    weekly-maintenance)
         weekly_maintenance
         ;;
+    rotate-logs)
+        rotate_logs
+        ;;
     *)
-        echo "Usage: $0 {start|stop|restart|status|backup|schedule}"
+        echo "Catalyst Trading System - Production Manager"
+        echo ""
+        echo "Usage: $0 {command}"
         echo ""
         echo "Commands:"
-        echo "  start              - Start all services with market hours awareness"
-        echo "  stop               - Gracefully stop all services"
-        echo "  restart            - Stop and start all services"
-        echo "  status             - Check health of all services"
-        echo "  backup             - Create database backup"
-        echo "  schedule           - Set up automated market hours operations"
-        echo "  quick_health_check - Quick health check for cron"
-        echo "  notify_market_open - Market open notification"
-        echo "  market_close       - Market close operations"
-        echo "  weekly_maintenance - Run weekly maintenance tasks"
+        echo "  start               - Start all services"
+        echo "  stop                - Stop all services"
+        echo "  restart             - Restart all services"
+        echo "  status              - Check service health"
+        echo "  backup              - Create database backup"
+        echo "  health              - Quick health check (for cron)"
+        echo "  market-open         - Market open workflow"
+        echo "  market-close        - Market close workflow"
+        echo "  weekly-maintenance  - Weekly maintenance tasks"
+        echo "  rotate-logs         - Rotate and compress logs"
         exit 1
         ;;
 esac
