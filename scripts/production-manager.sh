@@ -22,17 +22,17 @@ log() {
 }
 
 print_success() {
-    echo -e "${GREEN}✓${NC} $1"
+    echo -e "${GREEN}[OK]${NC} $1"
     log "SUCCESS: $1"
 }
 
 print_error() {
-    echo -e "${RED}✗${NC} $1"
+    echo -e "${RED}[ERROR]${NC} $1"
     log "ERROR: $1"
 }
 
 print_status() {
-    echo -e "${YELLOW}→${NC} $1"
+    echo -e "${YELLOW}[INFO]${NC} $1"
     log "STATUS: $1"
 }
 
